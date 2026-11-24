@@ -1,19 +1,35 @@
-import React,{createContext,useContext,useEffect,useMemo,useRef,useState} from 'react';
-import {Link,NavLink,Route,Routes,useLocation,useNavigate} from 'react-router-dom';
-import {ShoppingBag,Search,Sun,Moon,Languages,ChevronDown,UserRound,ArrowRight,Instagram} from 'lucide-react';
+import React,{createContext,lazy,Suspense,useContext,useEffect,useRef,useState} from 'react';
+import {Link,NavLink,Route,Routes,useLocation,useNavigate,useNavigationType} from 'react-router-dom';
+import {ShoppingBag,Sun,Moon,Languages,ChevronDown,UserRound} from 'lucide-react';
 import {strings} from './i18n/strings.js';
+import {savePreference} from './preferences.js';
+import {Footer,Information} from './components/Information.jsx';
+import {StoreImage,RetryState,LoadingState} from './components/LoadingState.jsx';
+import {variantLabel} from './sizes.js';
 import StaggeredMenu from './components/StaggeredMenu.jsx';
-import {Home,Shop,ProductPage,BundlePage,CartPage,CheckoutPage,OrderThankYou,TrackPage,MyOrdersPage,AuthPage,AdminPage,NotFound} from './pages/Pages.jsx';
+import {Home,Shop,ProductPage,BundlePage,CartPage,CheckoutPage,OrderThankYou,TrackPage,MyOrdersPage,AuthPage,NotFound} from './pages/Pages.jsx';
 export const Store=createContext(null);
 export const useStore=()=>useContext(Store);
 export async function api(path,options={}){
- const result=await fetch('/api'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json',...options.headers},...options});
- const json=await result.json().catch(()=>({}));
- if(!result.ok)throw new Error(json.error||'Request failed');
+ const {headers,signal,...request}=options;
+ const deadline=AbortSignal.timeout(12000);
+ const result=await fetch('/api'+path,{...request,credentials:'same-origin',signal:signal?AbortSignal.any([signal,deadline]):deadline,headers:{
+  ...(typeof request.body==='string'?{'Content-Type':'application/json'}:{}),...headers
+ }});
+ const json=result.headers.get('content-type')?.includes('application/json')?await result.json().catch(()=>null):null;
+ if(!result.ok||json===null)throw Object.assign(new Error(json?.error||'The store service is temporarily unavailable'),{status:result.status,code:json?.code});
  return json;
 }
-export const money=(n)=>new Intl.NumberFormat('en-EG',{style:'currency',currency:'EGP',maximumFractionDigits:0}).format(n||0);
-export const label=(obj,lang)=>obj?.[lang]||obj?.en||'';
+export const money=(n,lang='en')=>new Intl.NumberFormat(lang==='ar'?'ar-EG':'en-EG',{style:'currency',currency:'EGP',minimumFractionDigits:0,maximumFractionDigits:2}).format(n??0);
+export const label=(obj,lang)=>(obj?.[lang]||obj?.en||'').replaceAll('—',' - ');
+const AdminPage=lazy(()=>import('./pages/AdminPage.jsx'));
+function AdminRoute(){
+ const {lang,t,user,sessionReady,sessionError,loadSession}=useStore();
+ const loading=<LoadingState label={lang==='ar'?'جارٍ التحميل':'Loading administration'}/>;
+ if(!sessionReady)return <div className="container page-shell">{sessionError?<RetryState lang={lang} onRetry={()=>loadSession()}/>:loading}</div>;
+ if(user?.role!=='admin')return <div className="container page-shell"><h1>{lang==='ar'?'صفحة مخصصة للإدارة':'Restricted admin area'}</h1><Link to="/login" className="button-primary">{t.signIn}</Link></div>;
+ return <Suspense fallback={<div className="container page-shell">{loading}</div>}><AdminPage/></Suspense>;
+}
 const cartKey='gallermo:cart-v1';
 export function FlyToCart(ev){
  if(typeof window==='undefined'||window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
@@ -24,76 +40,159 @@ export function FlyToCart(ev){
  document.body.appendChild(img);
  import('gsap').then(({gsap})=>{
   gsap.to(img,{duration:.9,ease:'power2.inOut',keyframes:[
-   {x:(to.left-from.left)*.2-36,y:(to.top-from.top)*.25-34,rotation:-16,scale:1.1},
-   {x:(to.left-from.left)*.45+34,y:(to.top-from.top)*.48+15,rotation:16,scale:.8},
-   {x:(to.left-from.left)*.7-20,y:(to.top-from.top)*.72-22,rotation:-8,scale:.54},
-   {x:to.left-from.left,y:to.top-from.top,rotation:0,scale:.1,opacity:0}
-  ],onComplete:()=>img.remove()});
+   {x:(to.left+to.width/2-from.left-from.width/2)*.2-36,y:(to.top+to.height/2-from.top-from.height/2)*.25-34,rotation:-16,scale:1.1},
+   {x:(to.left+to.width/2-from.left-from.width/2)*.45+34,y:(to.top+to.height/2-from.top-from.height/2)*.48+15,rotation:16,scale:.8},
+   {x:(to.left+to.width/2-from.left-from.width/2)*.7-20,y:(to.top+to.height/2-from.top-from.height/2)*.72-22,rotation:-8,scale:.54},
+   {x:to.left+to.width/2-from.left-from.width/2,y:to.top+to.height/2-from.top-from.height/2,rotation:0,scale:.1,opacity:0}
+  ],onComplete:()=>img.remove(),onInterrupt:()=>img.remove()});
  }).catch(()=>img.remove());
 }
 export function ProductCard({p}){
  const {lang,t,add}=useStore();
- const [variant,setVariant]=useState(p.variants?.[0]?.sku||'');
+ const [variant,setVariant]=useState(p.displayVariantSku||p.variants?.find(v=>v.stock!==0)?.sku||p.variants?.[0]?.sku||'');
+ const [notice,setNotice]=useState('');
  const choice=p.variants?.find(v=>v.sku===variant)||p.variants?.[0];
  return <article className="product-card">
-  <Link to={'/product/'+p.slug} className="product-visual"><img src={p.images?.[0]?.url} alt={p.images?.[0]?.alt||label(p.name,lang)} loading="lazy" decoding="async" width="400" height="400"/><span className="view-hint">{lang==='ar'?'التفاصيل':'Explore design'} <ArrowRight size={15}/></span></Link>
-  <div className="product-info"><Link to={'/product/'+p.slug} className="product-title">{label(p.name,lang)}</Link><div className="price">{money(choice?.priceEGP)}</div>
-   {p.variants?.length>1&&<label className="card-variant">{t.size}<select value={variant} onChange={e=>setVariant(e.target.value)}>{p.variants.map(v=><option value={v.sku} key={v.sku}>{v.label} — {money(v.priceEGP)}</option>)}</select></label>}
-   <button className="add-btn" disabled={!choice||choice.stock===0} type="button" onClick={e=>{FlyToCart(e);add({kind:'product',slug:p.slug,variantSku:choice.sku,quantity:1,addons:[],title:label(p.name,lang),image:p.images?.[0]?.url,unitPriceEGP:choice.priceEGP})}}>{t.add}<ShoppingBag size={16}/></button>
+  <Link to={'/product/'+p.slug} className="product-visual"><StoreImage src={p.images?.[0]?.url} alt={lang==='ar'?label(p.name,lang):p.images?.[0]?.alt||label(p.name,lang)} loading="lazy" decoding="async" width="400" height="400"/></Link>
+  <div className="product-info">
+   <Link to={'/product/'+p.slug} className="product-title">{label(p.name,lang)}</Link>
+   <div className="price">{money(choice?.priceEGP,lang)}</div>
+   <div className="card-choice">{p.variants?.length>1&&<label className="card-variant">{lang==='ar'?'اختر المقاس':'Choose size'}<select value={variant} onChange={e=>setVariant(e.target.value)}>{p.variants.map(v=><option value={v.sku} key={v.sku} disabled={v.stock===0}>{variantLabel(v.label,lang,p.categorySlug)} - {money(v.priceEGP,lang)}</option>)}</select></label>}</div>
+   <button className="add-btn" disabled={!choice||choice.stock===0} type="button" onClick={e=>{
+    const accepted=add({kind:'product',slug:p.slug,variantSku:choice.sku,variantLabel:choice.label,categorySlug:p.categorySlug,stock:choice.stock,quantity:1,addons:[],title:label(p.name,lang),image:p.images?.[0]?.url,unitPriceEGP:choice.priceEGP});
+    if(accepted)FlyToCart(e);
+    setNotice(accepted?(lang==='ar'?'تمت الإضافة':'Added to cart'):(lang==='ar'?'تم بلوغ الحد المتاح':'Cart quantity limit reached'));
+   }}>{choice?.stock===0?(lang==='ar'?'غير متاح':'Out of stock'):t.add}<ShoppingBag size={16}/></button>
+   <span role="status" className={notice.includes('limit')?'inline-error':'sr-only'}>{notice}</span>
   </div>
- </article>
+ </article>;
 }
 export default function App({initial={}}){
- const [lang,setLang]=useState('en');const [theme,setTheme]=useState('light');
- const [user,setUser]=useState(null);const [sessionReady,setSessionReady]=useState(false);
+ const [lang,setLang]=useState(initial.preferences?.lang||'en');const [theme,setTheme]=useState(initial.preferences?.theme||'light');
+ const [user,setUser]=useState(null);const [sessionReady,setSessionReady]=useState(false);const [sessionError,setSessionError]=useState(false);
+ const sessionVersion=useRef(0);
+ const acceptUser=user=>{sessionVersion.current++;setUser(user);setSessionReady(true);setSessionError(false)};
  const [cart,setCart]=useState([]);const [cartReady,setCartReady]=useState(false);
- const [config,setConfig]=useState(initial.config||{});
+ const cartRef=useRef([]);
+ const [categories,setCategories]=useState(initial.categories||[]);
+ const config=initial.config||{};
  const loc=useLocation();const navigate=useNavigate();const t=strings[lang];
  useEffect(()=>{
-  const savedLang=localStorage.getItem('gallermo:lang');const savedTheme=localStorage.getItem('gallermo:theme');
-  if(savedLang==='ar')setLang('ar');if(savedTheme==='dark')setTheme('dark');
-  try{setCart(JSON.parse(localStorage.getItem(cartKey)||'[]'))}catch{setCart([])}
+  const params=new URLSearchParams(loc.search);
+  const category=categories.find(item=>item.slug===params.get('category'));
+  const title=loc.pathname==='/shop'?(category?label(category.name,lang):t.shop):loc.pathname==='/cart'?t.cart:
+   loc.pathname==='/checkout'?t.checkout:loc.pathname==='/track-order'?t.track:loc.pathname==='/account/orders'?t.orders:
+   loc.pathname==='/admin'?t.admin:loc.pathname==='/login'?t.signIn:loc.pathname==='/register'?t.signUp:null;
+  if(!/^\/(product|bundle)\//.test(loc.pathname))document.title=title?title+" | Gallermo Store":"Gallermo Store | It's Not Over Yet";
+  const canonical=document.querySelector('link[rel=canonical]');
+  if(!canonical)return;
+  const isShop=loc.pathname==='/shop';
+  const detail=/^\/(product|bundle)\//.test(loc.pathname);
+  if(!detail){
+   document.getElementById('product-schema')?.remove();
+   const description=document.querySelector('meta[name=description]');
+   if(description)description.content=t.tagline;
+  }
+  const url=new URL(canonical.href);
+  url.pathname=loc.pathname;
+  url.search=isShop&&category?new URLSearchParams({category:category.slug}).toString():'';
+  canonical.href=url.href;
+  const robots=document.querySelector('meta[name=robots]');
+  if(robots)robots.content=initial.staging||!/^\/(?:$|shop$|contact$|product\/|bundle\/)/.test(loc.pathname)||detail&&initial.detailSlug===loc.pathname.split('/')[2]&&initial.detailStatus>=400||
+   isShop&&[...params.keys()].some(key=>key!=='category')||isShop&&params.has('category')&&!category?'noindex,nofollow':'index,follow';
+ },[loc.pathname,loc.search,lang,categories,t,initial.staging]);
+ const loadSession=async signal=>{
+  const version=++sessionVersion.current;
+  setSessionError(false);
+  try{const response=await api('/auth/me',{signal});if(version===sessionVersion.current)acceptUser(response.user);}
+  catch(error){if(version===sessionVersion.current&&error.name!=='AbortError'){setSessionReady(false);setSessionError(true);}}
+ };
+ const refreshCategories=(signal)=>api('/categories',{signal}).then(setCategories);
+ useEffect(()=>{
+  try {
+   const stored=JSON.parse(localStorage.getItem(cartKey)||'[]');
+   if(Array.isArray(stored)){cartRef.current=stored;setCart(stored);}
+  }catch{}
   setCartReady(true);
-  api('/auth/me').then(v=>setUser(v.user)).catch(()=>{}).finally(()=>setSessionReady(true));
-  api('/config').then(setConfig).catch(()=>{});
+  const controller=new AbortController();
+  void loadSession(controller.signal);
+  return ()=>controller.abort();
  },[]);
- useEffect(()=>{document.documentElement.lang=lang;document.documentElement.dir=lang==='ar'?'rtl':'ltr';localStorage.setItem('gallermo:lang',lang)},[lang]);
- useEffect(()=>{document.documentElement.dataset.theme=theme;localStorage.setItem('gallermo:theme',theme)},[theme]);
- useEffect(()=>{if(cartReady)localStorage.setItem(cartKey,JSON.stringify(cart))},[cart,cartReady]);
- useEffect(()=>{window.scrollTo({top:0,behavior:'instant'})},[loc.pathname]);
- const add=(item)=>setCart(old=>{const index=old.findIndex(i=>i.kind===item.kind&&i.slug===item.slug&&i.variantSku===item.variantSku&&JSON.stringify(i.addons)===JSON.stringify(item.addons));if(index<0)return [...old,item];return old.map((x,j)=>j===index?{...x,quantity:Math.min(10,x.quantity+item.quantity)}:x)});
- const remove=(index)=>setCart(old=>old.filter((_,j)=>j!==index));
- const updateQty=(index,qty)=>setCart(old=>old.map((x,j)=>j===index?{...x,quantity:Math.min(10,Math.max(1,qty))}:x));
+ const changeLanguage=()=>{
+  const value=lang==='en'?'ar':'en';
+  savePreference('lang',value);
+  document.documentElement.lang=value;
+  document.documentElement.dir=value==='ar'?'rtl':'ltr';
+  setLang(value);
+ };
+ const changeTheme=()=>{
+  const value=theme==='light'?'dark':'light';
+  savePreference('theme',value);
+  document.documentElement.dataset.theme=value;
+  setTheme(value);
+ };
+ useEffect(()=>{if(cartReady)try{localStorage.setItem(cartKey,JSON.stringify(cart));}catch{}},[cart,cartReady]);
+ const navigationType=useNavigationType();
+ useEffect(()=>{if(navigationType!=='POP')window.scrollTo({top:0,behavior:'instant'});},[loc.pathname,navigationType]);
+ const commitCart=next=>{cartRef.current=next;setCart(next);};
+ const add=item=>{
+  const old=cartRef.current;
+  const choices=(item.addons||[]).slice().sort().join(',');
+  const index=old.findIndex(row=>row.kind===item.kind&&row.slug===item.slug&&row.variantSku===item.variantSku&&row.customizationId===item.customizationId&&(row.addons||[]).slice().sort().join(',')===choices);
+  const quantity=(old[index]?.quantity||0)+item.quantity;
+  const sameSku=old.filter(row=>row.slug===item.slug&&row.variantSku===item.variantSku).reduce((total,row)=>total+row.quantity,0);
+  if(quantity>10||sameSku+item.quantity>(item.stock??Infinity)||index<0&&old.length>=30)return false;
+  commitCart(index<0?[...old,item]:old.map((row,i)=>i===index?{...row,quantity}:row));
+  return true;
+ };
+ const remove=index=>commitCart(cartRef.current.filter((_,i)=>i!==index));
+ const quantityLimit=index=>{
+  const row=cartRef.current[index];
+  if(!row)return 0;
+  const others=cartRef.current.reduce((total,item,i)=>total+(i!==index&&item.slug===row.slug&&item.variantSku===row.variantSku?item.quantity:0),0);
+  return Math.min(10,(row.stock??Infinity)-others);
+ };
+ const updateQty=(index,quantity)=>{
+  if(quantity>=1&&quantity<=quantityLimit(index))commitCart(cartRef.current.map((row,i)=>i===index?{...row,quantity}:row));
+ };
+ const replaceArtwork=(index,oldId,newId)=>{
+  if(cartRef.current[index]?.customizationId!==oldId)return false;
+  commitCart(cartRef.current.map((row,i)=>i===index?{...row,customizationId:newId}:row));
+  return true;
+ };
  const count=cart.reduce((sum,x)=>sum+x.quantity,0);
- const links=[{to:'/',label:t.home},{to:'/shop',label:t.shop},...(user?.role==='admin'?[{to:'/admin',label:t.admin}]:user?.role==='customer'?[{to:'/account/orders',label:t.orders}]:[{to:'/track-order',label:t.track}])];
- const value=useMemo(()=>({initial,lang,t,theme,user,setUser,sessionReady,cart,add,remove,updateQty,setCart,config}),[initial,lang,theme,user,sessionReady,cart,config]);
- const closeSession=async()=>{try{await api('/auth/logout',{method:'POST'})}catch{}setUser(null);navigate('/')};
+ const links=[{to:'/',label:t.home},{to:'/shop',label:t.shop},...(user?.role==='admin'?[{to:'/admin',label:t.admin}]:user?.role==='customer'?[{to:'/account/orders',label:t.orders}]:sessionReady?[{to:'/track-order',label:t.track}]:[])];
+ const [logoutError,setLogoutError]=useState(false);
+ const value={initial,lang,t,theme,user,setUser:acceptUser,sessionReady,sessionError,loadSession,cart,cartReady,add,remove,updateQty,quantityLimit,replaceArtwork,setCart:commitCart,config,categories,refreshCategories};
+ const closeSession=async()=>{try{await api('/auth/logout',{method:'POST'});acceptUser(null);setLogoutError(false);navigate('/');}
+ catch{setLogoutError(true);}};
  return <Store.Provider value={value}>
   <a className="skip-link" href="#main">{lang==='ar'?'تخطي إلى المحتوى':'Skip to content'}</a>
   <header className="site-header">
    <div className="header-inner">
-    <Link className="brand" to="/" aria-label="Gallermo Store home"><img src="/gallermo-logo.webp" alt="" width="45" height="45"/><span>GALLERMO<small>STORE</small></span></Link>
-    <nav className="desktop-nav" aria-label="Main navigation">
+    <StaggeredMenu links={[...links,{to:'/cart',label:t.cart},...(!user&&sessionReady?[{to:'/login',label:t.signIn}]:[])]} lang={lang} t={t} theme={theme} onLanguage={changeLanguage} onTheme={changeTheme} onLogout={user?closeSession:null} categoryLabel={t.categories} categoryLinks={categories.map(c=>({to:'/shop?category='+c.slug,label:label(c.name,lang)}))}/>
+    <Link className="brand" to="/" aria-label={lang==='ar'?'جاليرمو، الرئيسية':'Gallermo Store home'}><img src="/gallermo-logo.webp" alt="" width="52" height="52"/></Link>
+    <nav className="desktop-nav" aria-label={lang==='ar'?'التنقل الرئيسي':'Main navigation'}>
       <NavLink to="/" end>{t.home}</NavLink><NavLink to="/shop">{t.shop}</NavLink>
-      <div className="categories-dropdown"><button type="button" aria-label={t.categories} aria-haspopup="true">{t.categories}<ChevronDown size={15}/></button><div className="categories-menu">{(initial.categories||[]).map(c=><Link key={c.slug} to={'/shop?category='+c.slug}>{label(c.name,lang)}</Link>)}</div></div>
-      {user?.role==='admin'?<NavLink to="/admin">{t.admin}</NavLink>:user?.role==='customer'?<NavLink to="/account/orders">{t.orders}</NavLink>:<NavLink to="/track-order">{t.track}</NavLink>}
+      <div className="categories-dropdown"><button type="button" aria-label={t.categories} aria-haspopup="true">{t.categories}<ChevronDown size={15}/></button><div className="categories-menu">{categories.map(c=><Link key={c.slug} to={'/shop?category='+c.slug}>{label(c.name,lang)}</Link>)}</div></div>
+      {user?.role==='admin'?<NavLink to="/admin">{t.admin}</NavLink>:user?.role==='customer'?<NavLink to="/account/orders">{t.orders}</NavLink>:sessionReady?<NavLink to="/track-order">{t.track}</NavLink>:null}
     </nav>
     <div className="header-actions">
-     <button type="button" className="icon-button" onClick={()=>setLang(x=>x==='en'?'ar':'en')} aria-label={t.language} title={t.language}><Languages size={19}/></button>
-     <button type="button" className="icon-button" onClick={()=>setTheme(x=>x==='light'?'dark':'light')} aria-label={theme==='light'?t.dark:t.light} title={theme==='light'?t.dark:t.light}>{theme==='light'?<Moon size={19}/>:<Sun size={19}/>}</button>
-     {user?<button type="button" className="icon-button auth-icon" onClick={closeSession} aria-label={t.logout} title={t.logout}><UserRound size={19}/></button>:<Link className="icon-button auth-icon" to="/login" aria-label={t.signIn} title={t.signIn}><UserRound size={19}/></Link>}
+     <button type="button" className="icon-button" onClick={changeLanguage} aria-label={t.language} title={t.language}><Languages size={19}/></button>
+     <button type="button" className="icon-button" onClick={changeTheme} aria-label={theme==='light'?t.dark:t.light} title={theme==='light'?t.dark:t.light}>{theme==='light'?<Moon size={19}/>:<Sun size={19}/>}</button>
+     {user?<button type="button" className="icon-button auth-icon" onClick={closeSession} aria-label={t.logout} title={t.logout}><UserRound size={19}/></button>:sessionReady?<Link className="icon-button auth-icon" to="/login" aria-label={t.signIn} title={t.signIn}><UserRound size={19}/></Link>:null}
      <Link className="icon-button nav-cart" to="/cart" aria-label={`${t.cart}: ${count}`}><ShoppingBag size={20} id="nav-cart-icon"/>{count>0&&<span className="cart-count">{count}</span>}</Link>
-     <StaggeredMenu links={[...links,{to:'/cart',label:t.cart},...(!user?[{to:'/login',label:t.signIn}]:[])]} lang={lang} label={lang==='ar'?'القائمة':'Menu'} categoryLabel={t.categories} categoryLinks={(initial.categories||[]).filter(c=>c.published).map(c=>({to:'/shop?category='+c.slug,label:label(c.name,lang)}))}/>
     </div>
    </div>
   </header>
-  <main id="main"><Routes>
+  {logoutError&&<RetryState lang={lang} onRetry={closeSession}/>}
+  <main id="main"><Routes future={{v7_relativeSplatPath:true}}>
     <Route path="/" element={<Home/>}/><Route path="/shop" element={<Shop/>}/><Route path="/product/:slug" element={<ProductPage/>}/>
     <Route path="/bundle/:slug" element={<BundlePage/>}/><Route path="/cart" element={<CartPage/>}/><Route path="/checkout" element={<CheckoutPage/>}/><Route path="/order-confirmed/:number" element={<OrderThankYou/>}/>
     <Route path="/track-order" element={<TrackPage/>}/><Route path="/account/orders" element={<MyOrdersPage/>}/>
     <Route path="/login" element={<AuthPage mode="login"/>}/><Route path="/register" element={<AuthPage mode="register"/>}/>
-    <Route path="/admin" element={<AdminPage/>}/><Route path="*" element={<NotFound/>}/>
+    <Route path="/admin" element={<AdminRoute/>}/><Route path="/contact" element={<Information/>}/><Route path="/information/:page" element={<Information/>}/><Route path="*" element={<NotFound/>}/>
    </Routes></main>
-  <footer className="footer"><div className="container footer-grid"><div><Link to="/" className="footer-logo">GALLERMO <span>STORE</span></Link><p>{t.footerText}</p><p className="fine-print">© {new Date().getFullYear()} Gallermo Store</p></div><div><strong>{t.shop}</strong><Link to="/shop">{t.all}</Link>{(initial.categories||[]).slice(0,4).map(c=><Link key={c.slug} to={'/shop?category='+c.slug}>{label(c.name,lang)}</Link>)}</div><div><strong>{t.orders}</strong>{user?.role==='customer'?<Link to="/account/orders">{t.myOrders}</Link>:user?.role==='admin'?<Link to="/admin">{t.adminConsole}</Link>:<Link to="/track-order">{t.guestTrack}</Link>}<Link to="/cart">{t.cart}</Link><p>It's not over yet.</p></div></div></footer>
+  <Footer/>
  </Store.Provider>;
 }

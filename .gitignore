@@ -7,3 +7,8 @@ dist/
 *.log
 coverage/
 .vite/
+apps/api/.private/
+test-results/
+playwright-report/
+/GALLERMO_V2_REVIEW_EVIDENCE.zip
+/GALLERMO_V2_COMPLETE_DIFF.patch

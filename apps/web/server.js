@@ -4,70 +4,130 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import 'dotenv/config';
-const root=path.dirname(fileURLToPath(import.meta.url));
-const isProd=process.env.NODE_ENV==='production';
-const api=process.env.API_INTERNAL_URL||'http://localhost:4000';
-const site=(process.env.PUBLIC_SITE_URL||'http://localhost:5173').replace(/\/$/,'');
-const app=express();
+import {catalogQuery} from './src/catalog-query.js';
+import {readPreferences} from './src/preferences.js';
+import {productStructuredData} from './src/product-metadata.js';
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const isProd = process.env.NODE_ENV === 'production';
+const api = process.env.API_INTERNAL_URL || 'http://127.0.0.1:4000';
+const site = (process.env.PUBLIC_SITE_URL || 'http://localhost:5173').replace(/\/$/, '');
+const staging = /^(localhost|127\.0\.0\.1)$/.test(new URL(site).hostname) || process.env.NO_INDEX === 'true';
+const assetExists = async file => fs.access(path.join(root, isProd ? 'dist/client' : 'public', file)).then(() => true, () => false);
+const [hero, chart] = await Promise.all([assetExists('hero/gallermo-hero.webp'), assetExists('size-charts/frames-sizechart.webp')]);
+const app = express();
 app.disable('x-powered-by');
-app.use(createProxyMiddleware({pathFilter:'/api',target:api,changeOrigin:true}));
-let vite;
-if(!isProd){
- const {createServer}=await import('vite');
- vite=await createServer({root,server:{middlewareMode:true},appType:'custom'});
- app.use(vite.middlewares);
-}else{
- app.use(express.static(path.join(root,'dist/client'),{index:false,maxAge:'1d',setHeaders:(res,filepath)=>{if(/\/assets\//.test(filepath)||/\/catalog\//.test(filepath))res.setHeader('Cache-Control','public,max-age=31536000,immutable')}}));
-}
-const xmlEscape=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-async function getJson(route,defaultValue){try{const response=await fetch(api+route,{signal:AbortSignal.timeout(5000)});return response.ok?await response.json():defaultValue}catch{return defaultValue}}
-app.get('/robots.txt',(req,res)=>{
- const locked=site.includes('localhost')||process.env.NO_INDEX==='true';
- res.type('text/plain').send(locked?'User-agent: *\nDisallow: /\n':`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /account\nDisallow: /cart\nDisallow: /checkout\nDisallow: /login\nDisallow: /register\nSitemap: ${site}/sitemap.xml\n`)
+app.use((_req,res,next)=>{
+  res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin'});
+  if (isProd) res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
+  next();
 });
-app.get('/sitemap.xml',async(req,res)=>{
- if(site.includes('localhost')||process.env.NO_INDEX==='true')return res.status(404).end();
- const cats=await getJson('/api/categories',[]);
- const items=[];
- for(let page=1;page<=100;page++){
-  const data=await getJson(`/api/products?page=${page}&limit=24`,{items:[]});
-  items.push(...data.items);
-  if(!data.items.length||items.length>=data.total)break;
- }
- const pages=['/','/shop',...cats.map(c=>'/shop?category='+encodeURIComponent(c.slug)),...items.map(p=>'/product/'+encodeURIComponent(p.slug))];
- res.type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+pages.map(p=>'<url><loc>'+xmlEscape(site+p)+'</loc></url>').join('')+'</urlset>');
+app.use(createProxyMiddleware({
+  pathFilter: pathname => pathname === '/api' || pathname.startsWith('/api/'),
+  target: api, changeOrigin: true, proxyTimeout: 8000, timeout: 10000,
+  on: {
+    error(error, req, res) {
+      console.error('[proxy]', req.method, req.url.split('/')[2]?.split('?')[0] || 'api', error.code || error.name);
+      if (!res.headersSent) res.writeHead(503, {'Content-Type':'application/json','Cache-Control':'no-store'});
+      res.end(JSON.stringify({code:'API_UNAVAILABLE',error:'The store service is temporarily unavailable'}));
+    }
+  }
+}));
+let vite;
+if (!isProd) {
+  const {createServer} = await import('vite');
+  vite = await createServer({root,configLoader:'runner',server:{middlewareMode:true,hmr:{port:Number(process.env.GALLERMO_HMR_PORT||24678)}},appType:'custom'});
+  app.use(vite.middlewares);
+} else {
+  app.use(express.static(path.join(root,'dist/client'),{index:false,maxAge:'1d',setHeaders(res,file){
+    if (/[\\/](assets|catalog)[\\/]/.test(file)) res.setHeader('Cache-Control','public,max-age=31536000,immutable');
+  }}));
+}
+const escape = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
+const safeJSON = value => JSON.stringify(value).replace(/</g,'\\u003c').replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');
+async function getJson(route) {
+  try {
+    const response = await fetch(api + route, {signal:AbortSignal.timeout(4500)});
+    const body = await response.json();
+    return response.ok ? {value:body,status:200} : {status:response.status,error:body.error || 'Request failed'};
+  } catch {
+    return {status:503,error:'The store service is temporarily unavailable'};
+  }
+}
+app.get('/robots.txt',(_req,res)=>res.type('text/plain').send(staging ? 'User-agent: *\nDisallow: /\n' :
+  `User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /account\nDisallow: /cart\nDisallow: /checkout\nSitemap: ${site}/sitemap.xml\n`));
+app.get('/sitemap.xml',async(_req,res)=>{
+  if (staging) return res.sendStatus(404);
+  const categories = await getJson('/api/categories');
+  if (!categories.value) return res.sendStatus(503);
+  const pages = ['/','/shop','/contact',...categories.value.map(c=>'/shop?category='+encodeURIComponent(c.slug))];
+  for (let page=1;page<=500;page++) {
+    const {value} = await getJson(`/api/products?page=${page}&limit=24`);
+    if (!value) return res.sendStatus(503);
+    pages.push(...value.items.map(p=>'/product/'+encodeURIComponent(p.slug)));
+    if (page * value.limit >= value.total) break;
+  }
+  res.type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+pages.map(p=>'<url><loc>'+escape(site+p)+'</loc></url>').join('')+'</urlset>');
 });
 app.get('*',async(req,res,next)=>{
- try{
-  const url=req.originalUrl;
-  const pathname=url.split('?')[0];
-  const params=new URLSearchParams(url.split('?')[1]||'');
-  const [categories,bundles,bestsellers,config,products,product,bundle]=await Promise.all([
-   getJson('/api/categories',[]),getJson('/api/bundles',[]),getJson('/api/bestsellers',[]),getJson('/api/config',{checkoutEnabled:false,currency:'EGP',instapayNumber:'+201149504797'}),
-   getJson(`/api/products?page=${Number(params.get('page')||1)}&limit=12${pathname==='/'?'&sort=featured':''}${params.get('category')?'&category='+encodeURIComponent(params.get('category')):''}${params.get('q')?'&q='+encodeURIComponent(params.get('q')):''}`,{items:[],total:0,page:1,limit:12}),
-   pathname.startsWith('/product/')?getJson('/api/products/'+encodeURIComponent(decodeURIComponent(pathname.slice(9))),null):null,
-   pathname.startsWith('/bundle/')?getJson('/api/bundles/'+encodeURIComponent(decodeURIComponent(pathname.slice(8))),null):null
-  ]);
-  const data={categories,bundles,bestsellers,config,products,product,bundle};
-  let template=isProd?await fs.readFile(path.join(root,'dist/client/index.html'),'utf8'):await fs.readFile(path.join(root,'index.html'),'utf8');
-  if(vite)template=await vite.transformIndexHtml(url,template);
-  const render=isProd?(await import('./dist/server/entry-server.js')).render:(await vite.ssrLoadModule('/src/entry-server.jsx')).render;
-  const html=render(url,data);
-  const title=(product||bundle)?`${(product||bundle).name.en} | Gallermo Store`:pathname==='/shop'?'Shop | Gallermo Store':'Gallermo Store | It’s Not Over Yet';
-  const description=(product?.description?.en||bundle?.description?.en||'Explore expressive wall art, neon frames, laptop sleeves and creative accessories at Gallermo Store.').replace(/<[^>]+>/g,'').slice(0,155);
-  const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  const privateRoute=/^\/(admin|account|login|register|cart|checkout|track-order)(\/|$)/.test(pathname);
-  const canonical=site+pathname+(pathname==='/shop'&&params.get('category')?'?category='+encodeURIComponent(params.get('category')):'');
-  const noindex=privateRoute||site.includes('localhost')||process.env.NO_INDEX==='true';
-  let structured='';
-  if(product&&product.images?.[0]&&!noindex&&config.checkoutEnabled){
-   const p=product;
-   const info={'@context':'https://schema.org','@type':'Product',name:p.name.en,description:p.description?.en||p.name.en,image:p.images.map(im=>site+im.url),sku:p.variants?.[0]?.sku,brand:{'@type':'Brand',name:'Gallermo Store'},offers:{'@type':'Offer',url:canonical,priceCurrency:'EGP',price:p.variants?.[0]?.priceEGP,availability:p.variants?.[0]?.stock===0?'https://schema.org/OutOfStock':'https://schema.org/InStock'}};
-   structured='<script type="application/ld+json">'+JSON.stringify(info).replace(/</g,'\\u003c')+'</script>';
+  try {
+    const url = req.originalUrl;
+    const pathname = req.path.replace(/\/+$/,'') || '/';
+    const params = new URLSearchParams(url.split('?').slice(1).join('?'));
+    const productPath = /^\/product\/[^/]+\/?$/.test(pathname);
+    const bundlePath = /^\/bundle\/[^/]+\/?$/.test(pathname);
+    const home = pathname === '/';
+    const shop = pathname === '/shop';
+    const shopQuery = catalogQuery(params);
+    const [categories,bundles,bestsellers,config,products,detail] = await Promise.all([
+      getJson('/api/categories'),
+      home ? getJson('/api/bundles') : {},
+      home ? getJson('/api/bestsellers') : {},
+      getJson('/api/config'),
+      shop ? getJson('/api/products?'+shopQuery) : home ? getJson('/api/products?limit=16&availability=in_stock') : {},
+      productPath ? getJson('/api/products/'+pathname.split('/')[2]) : bundlePath ? getJson('/api/bundles/'+pathname.split('/')[2]) : {}
+    ]);
+    const product = productPath ? detail.value : null;
+    const bundle = bundlePath ? detail.value : null;
+    const related = product ? await getJson('/api/products/'+encodeURIComponent(product.slug)+'/related') : {};
+    const data = {home,staging,categories:categories.value || [],bundles:bundles.value || [],bestsellers:bestsellers.value || [],
+      config:config.value || {checkoutEnabled:false,currency:'EGP'},products:products.value,product,bundle,related:related.value || [],
+      detailSlug:productPath||bundlePath?decodeURIComponent(pathname.split('/')[2]):null,detailStatus:detail.status, productsStatus:products.status,productsError:products.error,shopQuery:shop ? shopQuery : null,
+      homeError:home && (products.error || categories.error),preferences:readPreferences(req.headers.cookie),hero,chart};
+    let template = await fs.readFile(path.join(root,isProd?'dist/client/index.html':'index.html'),'utf8');
+    if (vite) template = await vite.transformIndexHtml(url,template);
+    const {render} = isProd ? await import('./dist/server/entry-server.js') : await vite.ssrLoadModule('/src/entry-server.jsx');
+    const {lang,theme} = data.preferences;
+    const category = (categories.value || []).find(c=>c.slug===params.get('category'));
+    const displayedName=entry=>entry.name[lang]||entry.name.en;
+    const title = product || bundle ? displayedName(product || bundle)+' | Gallermo Store' :
+      shop ? (category ? displayedName(category) : lang === 'ar' ? 'تسوق' : 'Shop')+' | Gallermo Store' : "Gallermo Store | It's Not Over Yet";
+    const description = ((product || bundle)?.description?.[lang] ||
+      (lang === 'ar' ? 'اكتشف اللوحات والإطارات والإكسسوارات الإبداعية من جاليرمو.' : 'Explore wall art, neon frames, laptop sleeves and accessories at Gallermo Store.')).replace(/<[^>]+>/g,'').slice(0,155);
+    const canonical = site+pathname+(shop && category ? '?category='+encodeURIComponent(category.slug) : '');
+    const known = home || shop || productPath || bundlePath || /^\/(cart|checkout|track-order|account\/orders|login|register|admin|contact|information\/(privacy|returns|shipping|terms)|order-confirmed\/[^/]+)$/.test(pathname);
+    const upstreamStatus = detail.status || (shop ? products.status : data.homeError ? 503 : 200);
+    const status = !known ? 404 : upstreamStatus >= 500 ? 503 : upstreamStatus || 200;
+    const noindex = staging || status !== 200 || /^\/(admin|account|login|register|cart|checkout|track-order|order-confirmed|information)(\/|$)/.test(pathname)
+      || (shop && [...params.keys()].some(key=>key !== 'category')) || (shop && params.has('category') && !category);
+    const structured=product&&!noindex?productStructuredData({
+      product,name:displayedName(product),description,canonical,checkoutEnabled:config.value?.checkoutEnabled
+    }):null;
+    const head = (data.preferences.missing.length ? '<script src="/preferences-bootstrap.js"></script>' : '') + `<title>${escape(title.replaceAll('—',' - '))}</title><meta name="description" content="${escape(description.replaceAll('—',' - '))}"><meta name="robots" content="${noindex?'noindex,nofollow':'index,follow'}"><link rel="canonical" href="${escape(canonical)}"><meta property="og:title" content="${escape(title.replaceAll('—',' - '))}"><meta property="og:type" content="${product?'product':'website'}">`;
+    const markup = render(url,data);
+    const schema = structured ? '<script type="application/ld+json" id="product-schema">'+safeJSON(structured)+'</script>' : '';
+    template = template.replace('<html lang="en">',`<html lang="${lang}" dir="${lang==='ar'?'rtl':'ltr'}" data-theme="${theme}">`)
+      .replace('<!--dynamic-head-->',()=>head+schema).replace('<!--ssr-outlet-->',()=>markup)
+      .replace('<!--initial-data-->',()=>`<script type="application/json" id="initial-data">${safeJSON(data)}</script>`);
+    res.status(status).set({'Content-Type':'text/html; charset=utf-8','Cache-Control':'private,no-store','Vary':'Cookie'}).end(template);
+  } catch(error) {
+    vite?.ssrFixStacktrace(error);
+    next(error);
   }
-  const head=`<title>${esc(title)}</title><meta name="description" content="${esc(description)}"><meta name="robots" content="${noindex?'noindex,nofollow':'index,follow'}"><link rel="canonical" href="${esc(canonical)}"><meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(description)}"><meta property="og:type" content="${product?'product':'website'}">${structured}`;
-  template=template.replace('<!--dynamic-head-->',head).replace('<!--ssr-outlet-->',()=>html).replace('<!--initial-data-->',()=>`<script>window.__GALLERMO_INITIAL__=${JSON.stringify(data).replace(/</g,'\\u003c').replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029')}</script>`);
-  res.status(pathname.startsWith('/product/')&&!product||pathname.startsWith('/bundle/')&&!bundle?404:200).set({'Content-Type':'text/html; charset=utf-8','Cache-Control':'private,no-cache'}).end(template);
- }catch(error){vite?.ssrFixStacktrace(error);next(error)}
 });
-app.listen(Number(process.env.PORT||5173),()=>console.log(`Gallermo Web http://localhost:${process.env.PORT||5173}`));
+app.use((error,req,res,_next)=>{
+  console.error('[web]',req.method,req.path,error.name);
+  if(res.headersSent)return res.end();
+  res.status(error instanceof URIError?400:500).type('text/plain').send('The store could not load this page.');
+});
+app.listen(Number(process.env.PORT||5173),()=>console.log('Gallermo Web listening on port '+String(process.env.PORT||5173)));

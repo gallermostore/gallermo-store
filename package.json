@@ -3,15 +3,25 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "workspaces": ["apps/api", "apps/web"],
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
   "scripts": {
     "dev": "concurrently -k -n API,WEB -c yellow,magenta \"npm run dev -w @gallermo/api\" \"npm run dev -w @gallermo/web\"",
     "build": "npm run build -w @gallermo/web",
     "start": "npm run start -w @gallermo/api",
     "seed": "npm run seed -w @gallermo/api",
     "create:admin": "npm run create:admin -w @gallermo/api",
-    "test": "npm run test -w @gallermo/api"
+    "test": "npm run test -w @gallermo/api",
+    "test:e2e": "playwright test"
   },
-  "devDependencies": {"concurrently": "^9.2.1"},
-  "engines": {"node": ">=22"}
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "concurrently": "^9.2.1",
+    "mongodb-memory-server": "^11.4.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
 }
