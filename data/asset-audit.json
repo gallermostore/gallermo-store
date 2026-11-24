@@ -1,0 +1,177 @@
+{
+  "originalImageCount": 360,
+  "uniqueProductImages": 336,
+  "duplicateImageCount": 23,
+  "categories": {
+    "normal-frames": 162,
+    "anime-neon-art": 12,
+    "supercar-neon-frames": 24,
+    "canvas-prints": 36,
+    "laptop-sleeves": 52,
+    "mouse-pads": 23,
+    "flags": 27,
+    "acrylic-coasters": 0
+  },
+  "priceLists": {
+    "Normal frames": [
+      {
+        "label": "20*30",
+        "priceEGP": 250
+      },
+      {
+        "label": "30*40",
+        "priceEGP": 350
+      },
+      {
+        "label": "40*50",
+        "priceEGP": 560
+      },
+      {
+        "label": "50*60",
+        "priceEGP": 740
+      },
+      {
+        "label": "60*70",
+        "priceEGP": 850
+      },
+      {
+        "label": "70*80",
+        "priceEGP": 1020
+      }
+    ],
+    "Neon animation chracters": [
+      {
+        "label": "65*40",
+        "priceEGP": 2800
+      },
+      {
+        "label": "75*45",
+        "priceEGP": 3250
+      },
+      {
+        "label": "80*45",
+        "priceEGP": 3820
+      },
+      {
+        "label": "90*50",
+        "priceEGP": 4120
+      },
+      {
+        "label": "100*50",
+        "priceEGP": 4530
+      }
+    ],
+    "Neon car frames": [
+      {
+        "label": "30*40",
+        "priceEGP": 675
+      },
+      {
+        "label": "40*50",
+        "priceEGP": 825
+      },
+      {
+        "label": "50*60",
+        "priceEGP": 980
+      },
+      {
+        "label": "60*80",
+        "priceEGP": 1190
+      }
+    ],
+    "Canvas": [
+      {
+        "label": "30*40",
+        "priceEGP": 600
+      },
+      {
+        "label": "40*60",
+        "priceEGP": 900
+      },
+      {
+        "label": "50*70",
+        "priceEGP": 1100
+      },
+      {
+        "label": "60*90",
+        "priceEGP": 1300
+      },
+      {
+        "label": "70*100",
+        "priceEGP": 1500
+      },
+      {
+        "label": "80*100",
+        "priceEGP": 1600
+      },
+      {
+        "label": "60*120",
+        "priceEGP": 1800
+      },
+      {
+        "label": "100*150",
+        "priceEGP": 2200
+      },
+      {
+        "label": "100*200",
+        "priceEGP": 2600
+      }
+    ],
+    "Laptop sleeves": [
+      {
+        "label": "12 Inch",
+        "priceEGP": 500
+      },
+      {
+        "label": "13 Inch",
+        "priceEGP": 500
+      },
+      {
+        "label": "14 Inch",
+        "priceEGP": 600
+      },
+      {
+        "label": "15.6   Inch",
+        "priceEGP": 600
+      },
+      {
+        "label": "17   Inch",
+        "priceEGP": 600
+      },
+      {
+        "label": "Strap",
+        "priceEGP": 100
+      }
+    ],
+    "Costers": [
+      {
+        "label": "dimensions 10*10",
+        "priceEGP": 200
+      }
+    ],
+    "Mouse pads": [
+      {
+        "label": "Standard",
+        "priceEGP": 250
+      }
+    ],
+    "Flags": [
+      {
+        "label": "100 width  * 50 long",
+        "priceEGP": 450
+      },
+      {
+        "label": "150 width  * 100 long",
+        "priceEGP": 600
+      }
+    ]
+  },
+  "sourceIssues": [
+    "23 images in Acrylic coasters duplicate Mouse pads",
+    "No product-to-image explicit mapping, names provisional",
+    "No bundle data or top-sellers statistics supplied",
+    "Arabic titles/descriptions not supplied",
+    "Images include third-party intellectual property; rights clearance needed before publishing",
+    "Shipping zones/rates, stock and brand policies not supplied"
+  ]
+}

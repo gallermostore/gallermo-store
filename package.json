@@ -1,0 +1,17 @@
+{
+  "name": "gallermo-store",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["apps/api", "apps/web"],
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c yellow,magenta \"npm run dev -w @gallermo/api\" \"npm run dev -w @gallermo/web\"",
+    "build": "npm run build -w @gallermo/web",
+    "start": "npm run start -w @gallermo/api",
+    "seed": "npm run seed -w @gallermo/api",
+    "create:admin": "npm run create:admin -w @gallermo/api",
+    "test": "npm run test -w @gallermo/api"
+  },
+  "devDependencies": {"concurrently": "^9.2.1"},
+  "engines": {"node": ">=22"}
+}

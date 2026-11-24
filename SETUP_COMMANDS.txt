@@ -1,0 +1,28 @@
+GALLERMO STORE — WINDOWS POWERSHELL SETUP
+
+1. Extract Gallermo-Store-MERN-v0.1.zip.
+2. Open PowerShell inside the extracted gallermo-store folder.
+3. Run:
+
+npm install
+Copy-Item apps\api\.env.example apps\api\.env
+Copy-Item apps\web\.env.example apps\web\.env
+
+4. Open apps\api\.env and paste your real standard/legacy mongodb:// URI.
+   Local MongoDB example: mongodb://127.0.0.1:27017/gallermo
+   Atlas legacy example is documented in apps\api\.env.example.
+   Leave CHECKOUT_ENABLED=false.
+   Never paste your MongoDB credentials into chat or commit .env.
+
+5. Run:
+
+npm run seed
+npm run create:admin
+npm run test
+npm run dev
+
+6. Visit http://localhost:5173
+7. API health: http://localhost:4000/api/health
+
+Create-admin command requires an interactive terminal. Read README.md and
+ROADMAP.md before enabling any live payments. No production launch authorized.
