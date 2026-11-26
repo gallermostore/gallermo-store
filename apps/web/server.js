@@ -1,9 +1,12 @@
+import {createHash} from 'node:crypto';
 import express from 'express';
+import compression from 'compression';
 import {createProxyMiddleware} from 'http-proxy-middleware';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import 'dotenv/config';
+import {heroDesktop,heroMobile,heroBreakpoint} from './src/hero.js';
 import {catalogQuery} from './src/catalog-query.js';
 import {readPreferences} from './src/preferences.js';
 import {productStructuredData} from './src/product-metadata.js';
@@ -14,12 +17,27 @@ const api = process.env.API_INTERNAL_URL || 'http://127.0.0.1:4000';
 const site = (process.env.PUBLIC_SITE_URL || 'http://localhost:5173').replace(/\/$/, '');
 const staging = /^(localhost|127\.0\.0\.1)$/.test(new URL(site).hostname) || process.env.NO_INDEX === 'true';
 const assetExists = async file => fs.access(path.join(root, isProd ? 'dist/client' : 'public', file)).then(() => true, () => false);
-const [hero, chart] = await Promise.all([assetExists('hero/gallermo-hero.webp'), assetExists('size-charts/frames-sizechart.webp')]);
+const [desktop,mobile,chart,artwork,preferencesSource] = await Promise.all([
+  assetExists(heroDesktop.slice(1)),assetExists(heroMobile.slice(1)),assetExists('size-charts/frames-sizechart.webp'),
+  fs.readdir(path.join(root,isProd?'dist/client':'public','categories')).catch(()=>[]),
+  fs.readFile(path.join(root,isProd?'dist/client':'public','preferences-bootstrap.js'),'utf8')
+]);
+// HTML normalizes newlines before CSP hashes the inline script.
+const preferencesScript=preferencesSource.replace(/\r\n?/g,'\n').replace(/<\/script/gi,'<\\/script');
+const preferencesHash=createHash('sha256').update(preferencesScript).digest('base64');
+const hero={desktop,mobile};
+const categoryArtwork=artwork.filter(file=>file.endsWith('.webp')).map(file=>file.slice(0,-5));
+const mediaOrigin=(()=>{
+  try{
+    const url=new URL(process.env.PUBLIC_MEDIA_BASE_URL);
+    return url.protocol==='https:'?' '+url.origin:'';
+  }catch{return '';}
+})();
 const app = express();
 app.disable('x-powered-by');
 app.use((_req,res,next)=>{
   res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin'});
-  if (isProd) res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
+  if (isProd) res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'sha256-" + preferencesHash + "'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:" + mediaOrigin + "; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
   next();
 });
 app.use(createProxyMiddleware({
@@ -33,6 +51,7 @@ app.use(createProxyMiddleware({
     }
   }
 }));
+if(isProd)app.use(compression());
 let vite;
 if (!isProd) {
   const {createServer} = await import('vite');
@@ -93,7 +112,7 @@ app.get('*',async(req,res,next)=>{
     const data = {home,staging,categories:categories.value || [],bundles:bundles.value || [],bestsellers:bestsellers.value || [],
       config:config.value || {checkoutEnabled:false,currency:'EGP'},products:products.value,product,bundle,related:related.value || [],
       detailSlug:productPath||bundlePath?decodeURIComponent(pathname.split('/')[2]):null,detailStatus:detail.status, productsStatus:products.status,productsError:products.error,shopQuery:shop ? shopQuery : null,
-      homeError:home && (products.error || categories.error),preferences:readPreferences(req.headers.cookie),hero,chart};
+      homeError:home && (products.error || categories.error),preferences:readPreferences(req.headers.cookie),hero,chart,categoryArtwork};
     let template = await fs.readFile(path.join(root,isProd?'dist/client/index.html':'index.html'),'utf8');
     if (vite) template = await vite.transformIndexHtml(url,template);
     const {render} = isProd ? await import('./dist/server/entry-server.js') : await vite.ssrLoadModule('/src/entry-server.jsx');
@@ -113,11 +132,14 @@ app.get('*',async(req,res,next)=>{
     const structured=product&&!noindex?productStructuredData({
       product,name:displayedName(product),description,canonical,checkoutEnabled:config.value?.checkoutEnabled
     }):null;
-    const head = (data.preferences.missing.length ? '<script src="/preferences-bootstrap.js"></script>' : '') + `<title>${escape(title.replaceAll('—',' - '))}</title><meta name="description" content="${escape(description.replaceAll('—',' - '))}"><meta name="robots" content="${noindex?'noindex,nofollow':'index,follow'}"><link rel="canonical" href="${escape(canonical)}"><meta property="og:title" content="${escape(title.replaceAll('—',' - '))}"><meta property="og:type" content="${product?'product':'website'}">`;
+    const head = (data.preferences.missing.length ? '<script>'+preferencesScript+'</script>' : '') + `<title>${escape(title.replaceAll('—',' - '))}</title><meta name="description" content="${escape(description.replaceAll('—',' - '))}"><meta name="robots" content="${noindex?'noindex,nofollow':'index,follow'}"><link rel="canonical" href="${escape(canonical)}"><meta property="og:title" content="${escape(title.replaceAll('—',' - '))}"><meta property="og:type" content="${product?'product':'website'}">`;
+    const preload=(href,media)=>'<link rel="preload" as="image" fetchpriority="high" href="'+href+'"'+(media?' media="'+media+'"':'')+'>';
+    const heroHead=home?(desktop&&mobile?preload(heroMobile,heroBreakpoint)+preload(heroDesktop,'not all and '+heroBreakpoint):
+      desktop?preload(heroDesktop):mobile?preload(heroMobile):''):'';
     const markup = render(url,data);
     const schema = structured ? '<script type="application/ld+json" id="product-schema">'+safeJSON(structured)+'</script>' : '';
     template = template.replace('<html lang="en">',`<html lang="${lang}" dir="${lang==='ar'?'rtl':'ltr'}" data-theme="${theme}">`)
-      .replace('<!--dynamic-head-->',()=>head+schema).replace('<!--ssr-outlet-->',()=>markup)
+      .replace('<!--dynamic-head-->',()=>heroHead+head+schema).replace('<!--ssr-outlet-->',()=>markup)
       .replace('<!--initial-data-->',()=>`<script type="application/json" id="initial-data">${safeJSON(data)}</script>`);
     res.status(status).set({'Content-Type':'text/html; charset=utf-8','Cache-Control':'private,no-store','Vary':'Cookie'}).end(template);
   } catch(error) {

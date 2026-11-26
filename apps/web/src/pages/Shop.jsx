@@ -1,6 +1,6 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {Link,useSearchParams} from 'react-router-dom';
-import {Search,SlidersHorizontal,ArrowDownUp} from 'lucide-react';
+import {Search,Check,X,SlidersHorizontal,ArrowDownUp} from 'lucide-react';
 import {api,label,ProductCard,useStore} from '../App.jsx';
 import {catalogQuery} from '../catalog-query.js';
 import {LoadingState,RetryState} from '../components/LoadingState.jsx';
@@ -26,16 +26,16 @@ function FilterForm({initial,categories,lang,t,onApply,dialog=false}) {
     }
     onApply(draft);
   }}>
-    <details open><summary>{t.categories}</summary><label className="filter-select"><span className="sr-only">{t.categories}</span>
+    <details><summary>{t.categories}</summary><label className="filter-select"><span className="sr-only">{t.categories}</span>
       <select name="category" value={draft.category} onChange={change}>
         <option value="">{ar?'جميع الفئات':'All categories'}</option>
         {categories.map(category=><option key={category.slug} value={category.slug}>{label(category.name,lang)}</option>)}
       </select></label></details>
-    <details open><summary>{ar?'التوفر':'Availability'}</summary><label className="filter-select"><span className="sr-only">{ar?'التوفر':'Availability'}</span>
+    <details><summary>{ar?'التوفر':'Availability'}</summary><label className="filter-select"><span className="sr-only">{ar?'التوفر':'Availability'}</span>
       <select name="availability" value={draft.availability} onChange={change}><option value="">{t.all}</option>
         <option value="in_stock">{ar?'متاح':'In stock'}</option><option value="out_of_stock">{ar?'غير متاح':'Out of stock'}</option>
       </select></label></details>
-    <details open><summary>{ar?'السعر (ج.م.)':'Price (EGP)'}</summary><div className="price-inputs">
+    <details><summary>{ar?'السعر (ج.م.)':'Price (EGP)'}</summary><div className="price-inputs">
       <label>{ar?'الأدنى':'Minimum'}<input type="number" inputMode="decimal" name="minPrice" min="0" max="1000000" step=".01" value={draft.minPrice} onChange={change}/></label>
       <label>{ar?'الأقصى':'Maximum'}<input type="number" inputMode="decimal" name="maxPrice" min="0" max="1000000" step=".01" value={draft.maxPrice} onChange={change}/></label>
     </div></details>
@@ -63,7 +63,6 @@ export function Shop(){
   const focusOnChange=useRef(false);
   const opener=useRef(null);
   const [drawer,setDrawer]=useState(null);
-  const [sortDraft,setSortDraft]=useState('featured');
   const sort=params.get('sort')||'featured';
   const selectedCategory=categories.find(category=>category.slug===params.get('category'));
   const current=record?.key===key?record:null;
@@ -95,7 +94,7 @@ export function Shop(){
     breakpoint.addEventListener('change',resize);
     return ()=>{document.body.style.overflow=previous;breakpoint.removeEventListener('change',resize);};
   },[drawer]);
-  const update=(changes)=>{
+  const update=(changes,focus=true)=>{
     const next=new URLSearchParams(params);
     next.delete('page');
     for(const [name,value] of Object.entries(changes)){
@@ -103,12 +102,11 @@ export function Shop(){
       else next.delete(name);
     }
     if(catalogQuery(next)===key)return;
-    focusOnChange.current=true;
+    focusOnChange.current=focus;
     setParams(next);
   };
   const open=(type,event)=>{
     opener.current=event.currentTarget;
-    setSortDraft(sort);
     setDrawer(type);
     dialog.current.showModal();
   };
@@ -119,14 +117,13 @@ export function Shop(){
     return '/shop'+(next.size?'?'+next.toString():'');
   };
   const filterLabel=ar?'الفلاتر':'Filters';
-  const sortLabel=ar?'الترتيب':'Sort';
+  const sortLabel=ar?'الترتيب حسب':'Sort by';
   const sortOptions=sorts.map(([value,en,arabic])=><option key={value} value={value}>{ar?arabic:en}</option>);
   const apply=filters=>{dialog.current?.close();update(filters);};
-  return <div className="container page-shell">
-    <div className="page-intro"><h1>{selectedCategory?label(selectedCategory.name,lang):t.shop}</h1>
-      <p>{selectedCategory?label(selectedCategory.description,lang):ar?'اختر القطعة التي تعبّر عنك.':'Find the piece that feels like you.'}</p></div>
+  return <div className="container page-shell shop-page">
+    <h1 className="sr-only">{selectedCategory?label(selectedCategory.name,lang):t.shop}</h1>
     <form className="search-form catalog-search" onSubmit={e=>{e.preventDefault();update({q:text.trim()});}}>
-      <label htmlFor="catalog-search">{ar?'بحث':'Search'}</label><Search size={19} aria-hidden="true"/>
+      <label className="sr-only" htmlFor="catalog-search">{ar?'بحث':'Search'}</label><Search size={19} aria-hidden="true"/>
       <input id="catalog-search" value={text} maxLength={75} onChange={e=>setText(e.target.value)} placeholder={t.search}/>
       <button type="submit">{ar?'بحث':'Search'}</button>
     </form>
@@ -134,16 +131,16 @@ export function Shop(){
       <button type="button" className="button-secondary" onClick={e=>open('filters',e)}><SlidersHorizontal size={17}/>{filterLabel}</button>
       <button type="button" className="button-secondary" onClick={e=>open('sort',e)}><ArrowDownUp size={17}/>{sortLabel}</button>
     </div>
-    <dialog ref={dialog} className="catalog-dialog" aria-label={drawer==='filters'?filterLabel:sortLabel}
+    <dialog ref={dialog} className={drawer==='sort'?'catalog-dialog sort-sheet':'catalog-dialog'} aria-label={drawer==='filters'?filterLabel:sortLabel}
       onClick={e=>{if(e.target===e.currentTarget){const bounds=e.currentTarget.getBoundingClientRect();if(e.clientX<bounds.left||e.clientX>bounds.right||e.clientY<bounds.top||e.clientY>bounds.bottom)dialog.current.close();}}}
       onClose={()=>{setDrawer(null);opener.current?.focus({preventScroll:true});}}>
       {drawer&&<div className="catalog-dialog-content"><div className="section-row"><h2>{drawer==='filters'?filterLabel:sortLabel}</h2>
-        <button type="button" className="button-secondary" onClick={()=>dialog.current.close()}>{t.cancel}</button></div>
+        <button type="button" className="icon-button" aria-label={ar?'إغلاق':'Close'} onClick={()=>dialog.current.close()}><X size={24}/></button></div>
         {drawer==='filters'?<FilterForm initial={valuesFrom(params)} categories={categories} lang={lang} t={t} onApply={apply} dialog/>:
-          <form className="stack-form" onSubmit={e=>{e.preventDefault();apply({sort:sortDraft==='featured'?'':sortDraft});}}>
-            <label>{sortLabel}<select value={sortDraft} onChange={e=>setSortDraft(e.target.value)}>{sortOptions}</select></label>
-            <button type="submit" className="button-primary">{ar?'عرض النتائج':'View results'}</button>
-          </form>}
+          <div className="sort-options">{sorts.map(([id,en,arabic])=><button type="button" key={id}
+            aria-pressed={id===sort} onClick={()=>{dialog.current.close();update({sort:id==='featured'?'':id},false);}}>
+            {ar?arabic:en}{id===sort&&<Check size={18} aria-hidden="true"/>}
+          </button>)}</div>}
       </div>}
     </dialog>
     <div className="catalog-layout">

@@ -44,7 +44,7 @@ export function catalogStages(filters, categorySlugs) {
   const available = {$or:[{$eq:[{$ifNull:['$$v.stock',null]},null]},{$gt:['$$v.stock',0]}]};
   const outOfStock = {$eq:['$$v.stock',0]};
   const hasRange = filters.minPrice !== undefined || filters.maxPrice !== undefined;
-  const eligible = filters.availability === 'out_of_stock' && !hasRange ? outOfStock : available;
+  const eligible = filters.availability === 'out_of_stock' ? outOfStock : available;
   const select = cond => ({$filter:{input:'$variants',as:'v',cond}});
   const stages = [
     {$match:match},

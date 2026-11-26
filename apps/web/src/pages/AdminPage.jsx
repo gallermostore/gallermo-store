@@ -3,7 +3,7 @@ import {CheckCircle2,Plus,Trash2} from 'lucide-react';
 import {api,label,money,useStore} from '../App.jsx';
 import {AdminOrders} from './AdminOrders.jsx';
 import {orderError} from './Checkout.jsx';
-import {LoadingState} from '../components/LoadingState.jsx';
+import {LoadingState,MutationLabel} from '../components/LoadingState.jsx';
 
 const defaultItem=(kind)=>{
  if(kind==='products')return {slug:'',name:{en:'',ar:''},description:{en:'',ar:''},categorySlug:'',images:[],variants:[{sku:'',label:'Standard',priceEGP:0,stock:null}],addons:[],published:false,featured:false};
@@ -12,7 +12,21 @@ const defaultItem=(kind)=>{
  return {code:'',kind:'percent',amount:10,minimumEGP:0,maxUses:null,enabled:false};
 };
 function AdminEditor({kind,item,onCancel,onSaved,products,categories}){
- const {t,lang,refreshCategories}=useStore();const tr=(en,ar)=>lang==='ar'?ar:en;const [data,setData]=useState(item?structuredClone(item):defaultItem(kind));const [err,setErr]=useState('');const [saving,setSaving]=useState(false);
+ const {t,lang,refreshCategories,notify}=useStore();const tr=(en,ar)=>lang==='ar'?ar:en;const [data,setData]=useState(item?structuredClone(item):defaultItem(kind));const [err,setErr]=useState('');const [saving,setSaving]=useState(false);
+ const [uploading,setUploading]=useState(false);
+ const uploadImage=async event=>{
+  const file=event.target.files[0];
+  event.target.value='';
+  if(!file||uploading)return;
+  setUploading(true);setErr('');
+  try{
+   const {url}=await api('/admin/media',{method:'POST',body:file,headers:{'Content-Type':file.type||'application/octet-stream'}});
+   if(kind==='categories')set('image',url);
+   else setData(old=>({...old,images:[...old.images,{url,alt:''}]}));
+   notify('Image uploaded','تم رفع الصورة');
+  }catch(error){setErr(orderError(error,lang));notify('Could not upload the image','تعذّر رفع الصورة',true);}
+  finally{setUploading(false);}
+ };
  const set=(key,value)=>setData(o=>({...o,[key]:value}));
  const setBi=(field,l,value)=>setData(o=>({...o,[field]:{...o[field],[l]:value}}));
  const editArray=(field,i,key,value)=>setData(o=>({...o,[field]:o[field].map((x,j)=>j===i?{...x,[key]:value}:x)}));
@@ -24,12 +38,15 @@ function AdminEditor({kind,item,onCancel,onSaved,products,categories}){
   if(kind==='bundles')return {slug:data.slug,name:data.name,description:data.description||{en:'',ar:''},items:data.items.map(x=>({productSlug:x.productSlug,variantSku:x.variantSku,quantity:Number(x.quantity)})),priceEGP:Number(data.priceEGP),images:data.images||[],published:!!data.published};
   return {code:data.code.toUpperCase(),kind:data.kind,amount:Number(data.amount),minimumEGP:Number(data.minimumEGP),maxUses:data.maxUses===''?null:data.maxUses===null?null:Number(data.maxUses),enabled:!!data.enabled,...(data.expiresAt?{expiresAt:new Date(data.expiresAt).toISOString()}: {})};
  };
- const save=async e=>{e.preventDefault();setSaving(true);setErr('');try{
-  await api('/admin/'+kind+(item?'/'+item._id:''),{method:item?'PUT':'POST',body:JSON.stringify(payload())});if(kind==='categories')void refreshCategories().catch(()=>{});onSaved();
- }catch(e){setErr(orderError(e,lang))}finally{setSaving(false)}};
+ const save=async e=>{e.preventDefault();if(saving||uploading)return;setSaving(true);setErr('');try{
+  await api('/admin/'+kind+(item?'/'+item._id:''),{method:item?'PUT':'POST',body:JSON.stringify(payload())});if(kind==='categories')void refreshCategories().catch(()=>{});notify('Changes saved','تم حفظ التغييرات');onSaved();
+ }catch(e){setErr(orderError(e,lang));notify('Could not save changes','تعذّر حفظ التغييرات',true);}finally{setSaving(false)}};
  return <form className="admin-editor" onSubmit={save}>
   <div className="section-row"><h2>{item?t.edit:t.create} · {({products:t.products,categories:t.categories,bundles:t.bundles,codes:t.codes})[kind]}</h2><button type="button" className="button-secondary" onClick={onCancel}>{t.cancel}</button></div>
   {(kind==='products'||kind==='categories'||kind==='bundles')&&<>
+    <label><MutationLabel busy={uploading} label={tr('Upload catalog image','رفع صورة للكتالوج')} lang={lang}/>
+      <input type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading||saving||(data.images?.length>=8)} onChange={uploadImage}/>
+    </label>
     <div className="form-grid">{input('slug',tr('Slug','معرّف الرابط'),data.slug,v=>set('slug',v),undefined,{required:true,pattern:'[a-z0-9-]{2,96}'})}{input('name-en',tr('English name','الاسم بالإنجليزية'),data.name?.en,v=>setBi('name','en',v),undefined,{required:true})}{input('name-ar',tr('Arabic name','الاسم بالعربية'),data.name?.ar,v=>setBi('name','ar',v))}</div>
     <div className="form-grid"><label>{tr('English description','الوصف بالإنجليزية')}<textarea value={data.description?.en||''} onChange={e=>setBi('description','en',e.target.value)}/></label><label>{tr('Arabic description','الوصف بالعربية')}<textarea value={data.description?.ar||''} onChange={e=>setBi('description','ar',e.target.value)}/></label></div>
   </>}
@@ -37,8 +54,8 @@ function AdminEditor({kind,item,onCancel,onSaved,products,categories}){
   {kind==='products'&&<>
    <label>{tr('Category','الفئة')}<select value={data.categorySlug} onChange={e=>set('categorySlug',e.target.value)} required><option value="">{tr('Choose category','اختر الفئة')}</option>{categories.map(c=><option key={c.slug} value={c.slug}>{label(c.name,lang)}</option>)}</select></label>
    <div className="admin-subsection"><div className="section-row"><h3>{tr('Images','الصور')}</h3><button type="button" className="small-action" onClick={()=>set('images',[...(data.images||[]),{url:'',alt:''}])}><Plus size={15}/> {tr('Add image','أضف صورة')}</button></div>
-   {(data.images||[]).map((im,i)=><div className="admin-line-editor" key={i}>{input('img-'+i,tr('Image path (/catalog/...)','مسار الصورة (/catalog/...)'),im.url,v=>editArray('images',i,'url',v),undefined,{required:true})}{input('alt-'+i,tr('Alternative text','النص البديل'),im.alt,v=>editArray('images',i,'alt',v))}<button type="button" aria-label={tr('Remove image','حذف الصورة')} onClick={()=>removeArray('images',i)}><Trash2 size={16}/></button></div>)}
-   <p className="muted">{tr('Use an existing image path under /catalog/.','استخدم مسار صورة موجودًا داخل ‎/catalog/‎.')}</p></div>
+   {(data.images||[]).map((im,i)=><div className="admin-line-editor" key={i}>{input('img-'+i,tr('Image URL','رابط الصورة'),im.url,v=>editArray('images',i,'url',v),undefined,{required:true})}{input('alt-'+i,tr('Alternative text','النص البديل'),im.alt,v=>editArray('images',i,'alt',v))}<button type="button" aria-label={tr('Remove image','حذف الصورة')} onClick={()=>removeArray('images',i)}><Trash2 size={16}/></button></div>)}
+   </div>
    <div className="admin-subsection"><div className="section-row"><h3>{tr('Sizes / variants','المقاسات والخيارات')}</h3><button type="button" className="small-action" onClick={()=>set('variants',[...data.variants,{sku:'',label:'',priceEGP:0,stock:null}])}><Plus size={15}/> {tr('Add option','أضف خيارًا')}</button></div>
    {data.variants?.map((v,i)=><div className="admin-line-editor variant-line" key={i}>{input('sku'+i,tr('SKU','رمز المنتج'),v.sku,x=>editArray('variants',i,'sku',x),undefined,{required:true})}{input('variant'+i,tr('Size / name','المقاس أو الاسم'),v.label,x=>editArray('variants',i,'label',x),undefined,{required:true})}{input('price'+i,tr('Price EGP','السعر بالجنيه'),v.priceEGP,x=>editArray('variants',i,'priceEGP',x),'number',{min:0,required:true})}{input('stock'+i,tr('Stock (empty = unmanaged)','المخزون (اتركه فارغًا إن كان غير محدد)'),v.stock??'',x=>editArray('variants',i,'stock',x===''?null:Number(x)),undefined,{inputMode:'numeric'})}<button type="button" onClick={()=>removeArray('variants',i)} aria-label={tr('Remove option','حذف الخيار')}><Trash2 size={16}/></button></div>)}
    </div>
@@ -58,10 +75,10 @@ function AdminEditor({kind,item,onCancel,onSaved,products,categories}){
     <p className="muted">{lang==='ar'?'يظل الطلب بالتصميم الأصلي متاحًا.':'Customers can still order the original design.'}</p>
   </div>}
   <div className="checkbox-settings"><label><input type="checkbox" checked={!!(kind==='codes'?data.enabled:data.published)} onChange={e=>set(kind==='codes'?'enabled':'published',e.target.checked)}/> {kind==='codes'?tr('Enabled','مفعّل'):tr('Published','منشور')}</label>{kind==='products'&&<label><input type="checkbox" checked={!!data.featured} onChange={e=>set('featured',e.target.checked)}/> {tr('Featured','ضمن المختارات')}</label>}</div>
-  <p className="inline-error" role="alert">{err}</p><button className="button-primary" disabled={saving} type="submit">{saving?tr('Saving…','جارٍ الحفظ…'):t.save}<CheckCircle2 size={17}/></button>
+  <p className="inline-error" role="alert">{err}</p><button className="button-primary" disabled={saving||uploading} type="submit">{saving?tr('Saving…','جارٍ الحفظ…'):t.save}<CheckCircle2 size={17}/></button>
  </form>
 }
-export default function AdminPage(){const {user,t,lang,refreshCategories}=useStore();const tr=(en,ar)=>lang==='ar'?ar:en;const [tab,setTab]=useState('products');const [rows,setRows]=useState([]);const [products,setProducts]=useState([]);const [categories,setCategories]=useState([]);const [editing,setEditing]=useState(undefined);const [err,setErr]=useState('');const [busy,setBusy]=useState(false);const [query,setQuery]=useState('');
+export default function AdminPage(){const {user,t,lang,refreshCategories,notify}=useStore();const tr=(en,ar)=>lang==='ar'?ar:en;const [tab,setTab]=useState('products');const [rows,setRows]=useState([]);const [products,setProducts]=useState([]);const [categories,setCategories]=useState([]);const [editing,setEditing]=useState(undefined);const [err,setErr]=useState('');const [busy,setBusy]=useState(false);const [query,setQuery]=useState('');
  const loadVersion=useRef(0);
  const load=async(signal)=>{
   const version=++loadVersion.current;
@@ -81,7 +98,8 @@ export default function AdminPage(){const {user,t,lang,refreshCategories}=useSto
  },[tab,user]);
  const tabs=[['products',t.products],['categories',t.categories],['bundles',t.bundles],['codes',t.codes],['orders',t.ordersAdmin]];
  const filtered=rows.filter(x=>`${(label(x.name,lang)||x.name?.en)||x.number||x.code||''} ${x.slug||''}`.toLowerCase().includes(query.toLowerCase()));
- const remove=async item=>{if(!window.confirm(tr('Remove this entry?','هل تريد حذف هذا العنصر؟')))return;try{await api('/admin/'+tab+'/'+item._id,{method:'DELETE'});if(tab==='categories')void refreshCategories().catch(()=>{});void load()}catch(e){setErr(orderError(e,lang))}};
+ const deleting=useRef(false);
+ const remove=async item=>{if(deleting.current||!window.confirm(tr('Remove this entry?','هل تريد حذف هذا العنصر؟')))return;deleting.current=true;try{await api('/admin/'+tab+'/'+item._id,{method:'DELETE'});if(tab==='categories')void refreshCategories().catch(()=>{});notify('Entry removed','تم حذف العنصر');void load()}catch(e){setErr(orderError(e,lang));notify('Could not remove the entry','تعذّر حذف العنصر',true);}finally{deleting.current=false;}};
  return <div className="container page-shell admin-page"><div className="page-intro"><h1>{t.adminConsole}</h1><p>{lang==='ar'?'إدارة المنتجات والأقسام والباقات والخصومات والطلبات':'Products, collections, bundles, promotions and orders.'}</p></div>
   <div className="admin-tabs" role="tablist" aria-label={tr('Admin sections','أقسام الإدارة')}>{tabs.map(([key,title])=><button key={key} type="button" role="tab" aria-selected={tab===key} className={tab===key?'active':''} onClick={()=>{setTab(key);setEditing(undefined);setQuery('')}}>{title}</button>)}</div>
   <p className="inline-error" role="alert">{err}</p>

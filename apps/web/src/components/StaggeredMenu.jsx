@@ -1,72 +1,102 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {Link,useLocation} from 'react-router-dom';
-import {Menu,X,Languages,Sun,Moon} from 'lucide-react';
 
-export default function StaggeredMenu({links,lang,categoryLinks,categoryLabel,onLogout,onLanguage,onTheme,theme,t}) {
-  const ar = lang === 'ar';
-  const [open,setOpen] = useState(false);
-  const dialog = useRef(null);
-  const opener = useRef(null);
-  const exitTimer = useRef(null);
-  const previousOverflow = useRef(null);
-  const location = useLocation();
-  const unlockScroll = () => {
-    if(previousOverflow.current === null)return;
+function MenuMark(){
+  return <svg className="menu-mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M4 12h16"/><path d="M4 12h16"/><path d="M4 12h16"/>
+  </svg>;
+}
+
+export default function StaggeredMenu({links,lang,categoryLinks,categoryLabel,onLogout,signIn,t}) {
+  const ar=lang==='ar';
+  const [open,setOpen]=useState(false);
+  const dialog=useRef(null);
+  const panel=useRef(null);
+  const opener=useRef(null);
+  const toggle=useRef(null);
+  const version=useRef(0);
+  const previousOverflow=useRef(null);
+  const {key}=useLocation();
+
+  function unlockScroll(){
+    if(previousOverflow.current===null)return;
     document.body.style.overflow=previousOverflow.current;
     previousOverflow.current=null;
-  };
-  const close = (immediate = false) => {
-    const element = dialog.current;
-    if (!element?.open || exitTimer.current) return;
-    const finish = () => { exitTimer.current = null; unlockScroll(); element.close(); };
-    if (immediate || matchMedia('(prefers-reduced-motion: reduce)').matches) finish();
-    else {
-      element.dataset.closing = '';
-      exitTimer.current = setTimeout(finish, 275);
+  }
+  function positionToggle(){
+    const button=opener.current.getBoundingClientRect();
+    dialog.current.style.setProperty('--menu-top',button.top+'px');
+    dialog.current.style.setProperty('--menu-right',(innerWidth-button.right)+'px');
+    dialog.current.style.setProperty('--menu-toggle-width',button.width+'px');
+    dialog.current.style.setProperty('--menu-toggle-height',button.height+'px');
+  }
+  function finish(){
+    if(!dialog.current?.open)return;
+    dialog.current.close();
+    unlockScroll();
+    setOpen(false);
+    if(opener.current?.offsetWidth)opener.current.focus({preventScroll:true});
+  }
+  function close(immediate=false){
+    const element=dialog.current;
+    if(!element?.open)return;
+    if(immediate){version.current++;finish();return;}
+    if(element.dataset.state==='closed')return;
+    const closing=++version.current;
+    element.dataset.state='closed';
+    const transitions=[...panel.current.getAnimations(),...element.querySelector('.navigation-shade').getAnimations()];
+    void Promise.allSettled(transitions.map(animation=>animation.finished)).then(()=>{
+      if(version.current===closing)finish();
+    });
+  }
+  function show(){
+    const element=dialog.current;
+    version.current++;
+    if(!element.open){
+      element.dataset.state='closed';
+      previousOverflow.current=document.body.style.overflow;
+      document.body.style.overflow='hidden';
+      positionToggle();
+      element.showModal();
+      void panel.current.offsetWidth;
+      setOpen(true);
     }
-  };
-  const show = () => {
-    delete dialog.current.dataset.closing;
-    dialog.current.showModal();
-    previousOverflow.current=document.body.style.overflow;
-    document.body.style.overflow='hidden';
-    setOpen(true);
-  };
-  useEffect(()=>{ close(); },[location.key]);
+    element.dataset.state='open';
+    toggle.current.focus({preventScroll:true});
+  }
+
+  useEffect(()=>{close();},[key]);
   useEffect(()=>{
-    const media = matchMedia('(max-width: 780px)');
-    const resize = () => {
-      if (media.matches) return;
-      clearTimeout(exitTimer.current);
-      exitTimer.current = null;
-      close(true);
+    const resize=()=>{
+      if(!dialog.current?.open)return;
+      if(!matchMedia('(max-width: 780px)').matches)close(true);
+      else positionToggle();
     };
-    media.addEventListener('change',resize);
-    return ()=>{ media.removeEventListener('change',resize); clearTimeout(exitTimer.current); unlockScroll(); };
+    window.addEventListener('resize',resize);
+    return ()=>{version.current++;window.removeEventListener('resize',resize);unlockScroll();};
   },[]);
+
   return <div className="stagger-menu">
-    <button ref={opener} type="button" className="icon-button" onClick={show} aria-label={ar?'فتح القائمة':'Open menu'} aria-expanded={open} aria-haspopup="dialog">
-      <Menu aria-hidden="true" size={24}/>
+    <button ref={opener} type="button" className="icon-button menu-trigger" onClick={show} aria-label={ar?'فتح القائمة':'Open menu'} aria-expanded={open} aria-haspopup="dialog">
+      <MenuMark/>
     </button>
     <dialog ref={dialog} className="navigation-drawer" aria-label={ar?'القائمة الرئيسية':'Main menu'}
-      onCancel={e=>{e.preventDefault();close();}} onClick={e=>{if (e.target===e.currentTarget)close();}}
-      onClose={()=>{unlockScroll();setOpen(false);if (opener.current?.offsetWidth) opener.current.focus({preventScroll:true});}}>
-      <div className="navigation-layer" aria-hidden="true"/>
-      <div className="navigation-layer" aria-hidden="true"/>
-      <div className="navigation-panel" dir={ar?'rtl':'ltr'}>
-        <div className="drawer-actions">
-          <button className="icon-button" type="button" autoFocus onClick={()=>close()} aria-label={ar?'إغلاق القائمة':'Close menu'}><X size={24}/></button>
-          <button className="icon-button" type="button" onClick={onLanguage} aria-label={t.language}><Languages size={20}/></button>
-          <button className="icon-button" type="button" onClick={onTheme} aria-label={theme==='light'?t.dark:t.light}>{theme==='light'?<Moon size={20}/>:<Sun size={20}/>}</button>
-        </div>
+      onCancel={event=>{event.preventDefault();close();}} onClick={event=>{if(event.target===event.currentTarget)close();}}>
+      <div className="navigation-shade" aria-hidden="true"/>
+      <button ref={toggle} type="button" className="icon-button drawer-toggle-copy" aria-label={ar?'إغلاق القائمة':'Close menu'}
+        onClick={()=>dialog.current.dataset.state==='closed'?show():close()}><MenuMark/></button>
+      <div ref={panel} className="navigation-panel" dir={ar?'rtl':'ltr'}>
         <nav className="drawer-links">
           {links.slice(0,2).map(link=><Link key={link.to} className="stagger-link" to={link.to} onClick={()=>close()}>{link.label}</Link>)}
           <details className="mobile-category-details"><summary>{categoryLabel}</summary><div className="mobile-category-links">
             {categoryLinks.map(link=><Link key={link.to} to={link.to} onClick={()=>close()}>{link.label}</Link>)}
           </div></details>
           {links.slice(2).map(link=><Link key={link.to} className="stagger-link" to={link.to} onClick={()=>close()}>{link.label}</Link>)}
-          {onLogout&&<button className="text-link" type="button" onClick={()=>{close();void onLogout();}}>{t.logout}</button>}
         </nav>
+        <div className="drawer-account">
+          {signIn&&<Link className="button-primary" to="/login" onClick={()=>close()}>{t.signIn}</Link>}
+          {onLogout&&<button className="button-secondary" type="button" onClick={()=>{close();void onLogout();}}>{t.logout}</button>}
+        </div>
       </div>
     </dialog>
   </div>;

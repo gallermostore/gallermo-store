@@ -4,4 +4,4 @@ import {BrowserRouter} from 'react-router-dom';
 import App from './App.jsx';
 
 const initial = JSON.parse(document.getElementById('initial-data').textContent);
-hydrateRoot(document.getElementById('root'), <BrowserRouter future={{v7_startTransition:true,v7_relativeSplatPath:true}}><App initial={initial}/></BrowserRouter>);
+hydrateRoot(document.getElementById('root'), <BrowserRouter><App initial={initial}/></BrowserRouter>);

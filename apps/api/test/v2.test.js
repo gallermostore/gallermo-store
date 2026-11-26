@@ -5,10 +5,13 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
+import {S3Client} from '@aws-sdk/client-s3';
+import {checkoutLaunchReady} from '../src/checkout-readiness.js';
 import {catalogSchema,categoryPolicy} from '../src/catalog.js';
 import {moneyTotals,paymentPlans} from '../src/checkout.js';
 import {normalizeImage} from '../src/private-assets.js';
-import {Category,Discount,Product,Order} from '../src/models.js';
+import {Category,Discount,Product,Order,Bundle,Notification} from '../src/models.js';
+import {deliverNext} from '../src/email.js';
 import {sizeInfo} from '../../web/src/sizes.js';
 import {startFixture,seed,first,flag,artLine,flagLine,fixtureBundle,address,trackedSku,testPassword,adminEmail} from './fixtures.js';
 
@@ -45,7 +48,7 @@ function client(){
 const guest=client(),admin=client(),customer=client(),stranger=client();
 const post=(agent,path,body)=>agent(path,{method:'POST',body});
 const upload=(agent,path,raw=artwork)=>agent('/private/'+path,{method:'POST',raw,headers:{'Content-Type':'application/octet-stream'}});
-const quote=(agent,lines,discountCode)=>post(agent,'/orders/quote',{lines,discountCode,governorate:'Cairo'});
+const quote=(agent,lines,discountCode)=>post(agent,'/orders/quote',{lines,discountCode,governorate:'cairo'});
 const stock=async()=> (await Product.findOne({slug:first.slug}).lean()).variants.find(v=>v.sku===trackedSku).stock;
 function orderBody(lines,data,details={}){
   return {idempotencyKey:randomUUID(),customer:address,lines,quoteToken:data.quoteToken,paymentMethod:'cod',...details};
@@ -61,17 +64,19 @@ test('variant size formatting covers every real seed label with safe chart gatin
     for(const language of ['en','ar']){
       const pretty=sizeInfo(variant.label,product.categorySlug,language);
       assert.ok(pretty.label.trim());
+      assert.ok(pretty.comparison?.trim());
       if(pretty.chart)assert.match(product.categorySlug,/frames|anime-neon-art/);
     }
   }
   assert.equal(sizeInfo('50*70','normal-frames').label,'50 × 70 cm');
   assert.equal(sizeInfo('18*20','mouse-pads').chart,false);
-  assert.equal(sizeInfo('unknown','laptop-sleeves').comparison,undefined);
+  assert.match(sizeInfo('unknown','laptop-sleeves').comparison,/Measure/);
+  assert.equal(sizeInfo('150 width  * 100 long','flags').label,'150 × 100 cm');
 });
 test('integer money conserves cents and rounds a half-piastre deposit up',()=>{
-  assert.deepEqual(paymentPlans(101,true),[{method:'instapay_deposit',requiredUpfrontPiastres:51,balancePiastres:50}]);
-  const value=moneyTotals(10001,{kind:'percent',amount:12.5},3000,true);
-  assert.equal(value.totalPiastres,11751);
+  assert.deepEqual(paymentPlans(12101,true,101)[0],{method:'instapay_deposit',requiredUpfrontPiastres:51,balancePiastres:12050});
+  const value=moneyTotals(10001,{kind:'percent',amount:12.5},9000,true,[{kind:'product',lineTotalEGP:100.01,category:{requiresPrepayment:true}}]);
+  assert.equal(value.totalPiastres,17751);
   assert.equal(value.plans[0].requiredUpfrontPiastres+value.plans[0].balancePiastres,value.totalPiastres);
 });
 test('auth, cookies, origin guard, logout and exact role isolation',async()=>{
@@ -144,8 +149,10 @@ test('bundle and mixed checkout reject COD, oversized duplicate demand and stale
   for(const lines of [[fixtureBundle],[flagLine,artLine]]){
     const result=await quote(guest,lines);
     assert.equal(result.status,200);
-    assert.equal(result.data.plans.length,1);
+    assert.equal(result.data.plans.length,2);
     assert.equal(result.data.plans[0].method,'instapay_deposit');
+    assert.equal(result.data.plans[1].requiredUpfrontPiastres,result.data.totalPiastres);
+    assert.equal(result.data.plans[1].balancePiastres,0);
     assert.equal((await post(guest,'/orders',orderBody(lines,result.data))).data.code,'PAYMENT_PLAN_CHANGED');
   }
   assert.equal((await quote(guest,[{...artLine,quantity:9},{...artLine,quantity:5}])).data.code,'STOCK_UNAVAILABLE');
@@ -248,4 +255,131 @@ test('legacy verified transfers can advance while legacy unverified transfers re
   const change=order=>admin('/admin/orders/'+order.id,{method:'PATCH',body:{status:'confirmed'}});
   assert.equal((await change(verified)).status,200);
   assert.equal((await change(pending)).data.code,'PAYMENT_REQUIRED');
+});
+
+test('v3 quotes allocate mixed bundles and proportional discounts across both shipping zones',async()=>{
+  const buyer=client();
+  await Product.updateOne({slug:first.slug,'variants.sku':trackedSku},{$set:{'variants.$.stock':12}});
+  await Bundle.create({slug:'mixed-fixture-v3',name:{en:'Mixed'},published:true,priceEGP:560,
+    items:[{productSlug:first.slug,variantSku:trackedSku,quantity:1},{productSlug:flag.slug,variantSku:flagLine.variantSku,quantity:1}]});
+  await Discount.create({code:'ZONE10',kind:'percent',amount:10,enabled:true});
+  const bundle={kind:'bundle',slug:'mixed-fixture-v3',quantity:2};
+  const lines=[bundle,flagLine];
+  const {status,data}=await post(buyer,'/orders/quote',{lines,discountCode:'ZONE10',governorate:'aswan'});
+  assert.equal(status,200);
+  assert.equal(data.shippingEGP,120);
+  assert.equal(data.discountEGP,157);
+  assert.deepEqual(data.lines.map(line=>line.discountPiastres),[11200,4500]);
+  assert.deepEqual(data.lines[0].components.map(c=>c.allocatedPiastres),[40000,72000]);
+  assert.deepEqual(data.lines[0].components.map(c=>c.discountPiastres),[4000,7200]);
+  assert.equal(data.depositBasisPiastres,36000);
+  assert.deepEqual(data.plans[0],{method:'instapay_deposit',requiredUpfrontPiastres:18000,balancePiastres:135300});
+  const regular=await quote(buyer,[flagLine]);
+  assert.equal(regular.data.shippingEGP,90);
+  assert.deepEqual(regular.data.plans.map(plan=>plan.method),['cod','instapay']);
+  assert.equal(regular.data.depositBasisPiastres,0);
+});
+
+test('out-of-stock price range selects the cheapest qualifying variant and sorts both ways',async()=>{
+  for(const [slug,prices,stocks] of [
+    ['price-fixture-a',[100,400,500],[0,0,0]],
+    ['price-fixture-b',[200,350],[0,0]],
+    ['price-fixture-c',[220,300],[2,0]]
+  ]){
+    await Product.create({slug,categorySlug:'flags',name:{en:slug},published:true,
+      variants:prices.map((priceEGP,i)=>({label:'Size '+i,sku:slug+i,priceEGP,stock:stocks[i]}))});
+  }
+  const base='/products?q=price-fixture&availability=out_of_stock&minPrice=300&maxPrice=500&sort=price_';
+  assert.deepEqual((await guest(base+'asc')).data.items.map(item=>item.catalogPrice),[350,400]);
+  assert.deepEqual((await guest(base+'desc')).data.items.map(item=>item.catalogPrice),[400,350]);
+});
+
+test('full InstaPay on a qualifying cart persists through mocked email failure and retry',async()=>{
+  const buyer=client();
+  const estimate=await quote(buyer,[artLine]);
+  const proof=await upload(buyer,'payment');
+  assert.equal(proof.status,201);
+  process.env.EMAIL_ENABLED='true';
+  process.env.ADMIN_NOTIFICATION_EMAIL='fixture-admin@example.invalid';
+  try{
+    const body=orderBody([artLine],estimate.data,{paymentMethod:'instapay',paymentProofId:proof.data.id,paymentReference:'FULL-V3-PROOF',locale:'ar'});
+    const placed=await post(buyer,'/orders',body);
+    assert.equal(placed.status,201);
+    assert.equal(placed.data.requiredUpfrontPiastres,estimate.data.totalPiastres);
+    assert.equal(placed.data.paymentStatus,'proof_submitted');
+    assert.equal((await post(buyer,'/orders',body)).data.number,placed.data.number);
+    assert.equal(await Notification.countDocuments({number:placed.data.number}),3);
+    const later=new Date(Date.now()+3600000);
+    assert.equal(await deliverNext({sendMail:async()=>{throw new Error('mock SMTP failure');}},later),true);
+    const failed=await Notification.findOne({number:placed.data.number,attempts:1}).lean();
+    assert.equal(failed.statusOfJob,'pending');
+    assert.equal(await Order.countDocuments({number:placed.data.number}),1);
+    const sent=[];
+    const transport={sendMail:async message=>sent.push(message)};
+    for(let i=0;i<3;i++)assert.equal(await deliverNext(transport,later),true);
+    assert.ok(sent.some(message=>message.text.includes('تم استلام')));
+    assert.ok(sent.every(message=>!message.text.includes(proof.data.id)&&!message.attachments));
+    assert.equal(await deliverNext(transport,later),false);
+  }finally{
+    process.env.EMAIL_ENABLED='false';
+    delete process.env.ADMIN_NOTIFICATION_EMAIL;
+  }
+});
+
+test('cart policy remains available with checkout disabled and legacy snapshots keep their totals',async()=>{
+  const flag=process.env.CHECKOUT_ENABLED;
+  process.env.CHECKOUT_ENABLED='false';
+  try{
+    assert.equal((await post(guest,'/orders/cart-policy',{lines:[artLine]})).data.requiresPrepayment,true);
+    assert.equal((await quote(guest,[artLine])).data.code,'CHECKOUT_DISABLED');
+    const legacy=await Order.create({number:'GL-LEGACY-V3',shippingEGP:30,totalEGP:180,totalPiastres:18000,
+      requiredUpfrontPiastres:9000,balancePiastres:9000,paymentMethod:'instapay_deposit',paymentStatus:'verified',
+      customer:{phone:'01011111111',governorate:'Cairo'}});
+    const tracked=await post(client(),'/orders/track',{number:legacy.number,phone:'01011111111'});
+    assert.equal(tracked.data.requiredUpfrontPiastres,9000);
+    assert.equal((await Order.findById(legacy._id).lean()).shippingEGP,30);
+  }finally{process.env.CHECKOUT_ENABLED=flag;}
+});
+
+test('a fully discounted qualifying item requires no transfer without marking payment verified',async()=>{
+  const buyer=client();
+  await Discount.create({code:'COMPED_V3',kind:'percent',amount:100,enabled:true});
+  const estimate=await quote(buyer,[artLine],'COMPED_V3');
+  assert.deepEqual(estimate.data.plans[0],{method:'instapay_deposit',requiredUpfrontPiastres:0,balancePiastres:9000});
+  const placed=await post(buyer,'/orders',orderBody([artLine],estimate.data,{discountCode:'COMPED_V3',paymentMethod:'instapay_deposit'}));
+  assert.equal(placed.status,201);
+  assert.equal(placed.data.paymentStatus,'not_required');
+  assert.equal(placed.data.balancePiastres,9000);
+  await post(admin,'/auth/login',{email:adminEmail,password:testPassword});
+  const record=await Order.findOne({number:placed.data.number}).lean();
+  assert.equal((await admin('/admin/orders/'+record._id,{method:'PATCH',body:{status:'confirmed'}})).status,200);
+});
+
+test('authorized production checkout requires live fixture indexes and both storage buckets',async()=>{
+ const settings={NODE_ENV:'production',CHECKOUT_ENABLED:'true',CHECKOUT_LAUNCH_AUTHORIZED:'false',
+  R2_PRIVATE_ACCESS_VERIFIED:'true',CHECKOUT_QUOTE_SECRET:'987654abcdef0123'.repeat(4),STORAGE_DRIVER:'r2',
+  CLIENT_ORIGIN:'https://store.example.invalid',R2_ACCOUNT_ID:'fixture',R2_ACCESS_KEY_ID:'fixture',
+  R2_SECRET_ACCESS_KEY:'fixture',R2_PUBLIC_BUCKET:'fixture-public',R2_PRIVATE_BUCKET:'fixture-private',
+  PUBLIC_MEDIA_BASE_URL:'https://media.example.invalid'};
+ const previous=Object.fromEntries(Object.keys(settings).map(key=>[key,process.env[key]]));
+ const buckets=[];
+ const original=S3Client.prototype.send;
+ S3Client.prototype.send=async command=>{buckets.push(command.input.Bucket);return {};};
+ Object.assign(process.env,settings);
+ try{
+  assert.equal(await checkoutLaunchReady(),false);
+  assert.deepEqual(buckets,[]);
+  process.env.CHECKOUT_LAUNCH_AUTHORIZED='true';
+  assert.equal(await checkoutLaunchReady(),true);
+  assert.deepEqual(buckets.sort(),['fixture-private','fixture-public']);
+  await Order.collection.dropIndex('idempotencyKey_1');
+  assert.equal(await checkoutLaunchReady({fresh:true}),false);
+ }finally{
+  S3Client.prototype.send=original;
+  for(const [key,value] of Object.entries(previous)){
+   if(value===undefined)delete process.env[key];
+   else process.env[key]=value;
+  }
+  await Order.createIndexes();
+ }
 });

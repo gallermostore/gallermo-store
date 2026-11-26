@@ -21,3 +21,7 @@ export function StoreImage({src,alt,...props}) {
     if (image.getAttribute('src')!=='/gallermo-logo.webp') image.src='/gallermo-logo.webp';
   }}/>;
 }
+
+export function MutationLabel({busy,label,lang}){
+  return <>{busy&&<span className="mutation-spinner" aria-hidden="true"/>}{busy?(lang==='ar'?'جارٍ التنفيذ…':'Working…'):label}</>;
+}

@@ -1,11 +1,12 @@
 import React,{createContext,lazy,Suspense,useContext,useEffect,useRef,useState} from 'react';
 import {Link,NavLink,Route,Routes,useLocation,useNavigate,useNavigationType} from 'react-router-dom';
-import {ShoppingBag,Sun,Moon,Languages,ChevronDown,UserRound} from 'lucide-react';
+import {ShoppingBag,Sun,Moon,Languages,ChevronDown,UserRound,X} from 'lucide-react';
 import {strings} from './i18n/strings.js';
 import {savePreference} from './preferences.js';
 import {Footer,Information} from './components/Information.jsx';
 import {StoreImage,RetryState,LoadingState} from './components/LoadingState.jsx';
 import {variantLabel} from './sizes.js';
+import {Announcement} from './components/HomeHighlights.jsx';
 import StaggeredMenu from './components/StaggeredMenu.jsx';
 import {Home,Shop,ProductPage,BundlePage,CartPage,CheckoutPage,OrderThankYou,TrackPage,MyOrdersPage,AuthPage,NotFound} from './pages/Pages.jsx';
 export const Store=createContext(null);
@@ -50,7 +51,6 @@ export function FlyToCart(ev){
 export function ProductCard({p}){
  const {lang,t,add}=useStore();
  const [variant,setVariant]=useState(p.displayVariantSku||p.variants?.find(v=>v.stock!==0)?.sku||p.variants?.[0]?.sku||'');
- const [notice,setNotice]=useState('');
  const choice=p.variants?.find(v=>v.sku===variant)||p.variants?.[0];
  return <article className="product-card">
   <Link to={'/product/'+p.slug} className="product-visual"><StoreImage src={p.images?.[0]?.url} alt={lang==='ar'?label(p.name,lang):p.images?.[0]?.alt||label(p.name,lang)} loading="lazy" decoding="async" width="400" height="400"/></Link>
@@ -61,15 +61,24 @@ export function ProductCard({p}){
    <button className="add-btn" disabled={!choice||choice.stock===0} type="button" onClick={e=>{
     const accepted=add({kind:'product',slug:p.slug,variantSku:choice.sku,variantLabel:choice.label,categorySlug:p.categorySlug,stock:choice.stock,quantity:1,addons:[],title:label(p.name,lang),image:p.images?.[0]?.url,unitPriceEGP:choice.priceEGP});
     if(accepted)FlyToCart(e);
-    setNotice(accepted?(lang==='ar'?'تمت الإضافة':'Added to cart'):(lang==='ar'?'تم بلوغ الحد المتاح':'Cart quantity limit reached'));
    }}>{choice?.stock===0?(lang==='ar'?'غير متاح':'Out of stock'):t.add}<ShoppingBag size={16}/></button>
-   <span role="status" className={notice.includes('limit')?'inline-error':'sr-only'}>{notice}</span>
   </div>
  </article>;
 }
 export default function App({initial={}}){
  const [lang,setLang]=useState(initial.preferences?.lang||'en');const [theme,setTheme]=useState(initial.preferences?.theme||'light');
  const [user,setUser]=useState(null);const [sessionReady,setSessionReady]=useState(false);const [sessionError,setSessionError]=useState(false);
+ const [toast,setToast]=useState(null);
+ const toastCounter=useRef(0);
+ const notify=(en,ar,error=false)=>{
+  const id=++toastCounter.current;
+  setToast(previous=>previous?.en===en&&previous.ar===ar&&previous.error===error?previous:{en,ar,error,id});
+ };
+ useEffect(()=>{
+  if(!toast)return;
+  const timeout=setTimeout(()=>setToast(null),toast.error?9000:5600);
+  return ()=>clearTimeout(timeout);
+ },[toast]);
  const sessionVersion=useRef(0);
  const acceptUser=user=>{sessionVersion.current++;setUser(user);setSessionReady(true);setSessionError(false)};
  const [cart,setCart]=useState([]);const [cartReady,setCartReady]=useState(false);
@@ -163,15 +172,28 @@ export default function App({initial={}}){
  const count=cart.reduce((sum,x)=>sum+x.quantity,0);
  const links=[{to:'/',label:t.home},{to:'/shop',label:t.shop},...(user?.role==='admin'?[{to:'/admin',label:t.admin}]:user?.role==='customer'?[{to:'/account/orders',label:t.orders}]:sessionReady?[{to:'/track-order',label:t.track}]:[])];
  const [logoutError,setLogoutError]=useState(false);
- const value={initial,lang,t,theme,user,setUser:acceptUser,sessionReady,sessionError,loadSession,cart,cartReady,add,remove,updateQty,quantityLimit,replaceArtwork,setCart:commitCart,config,categories,refreshCategories};
- const closeSession=async()=>{try{await api('/auth/logout',{method:'POST'});acceptUser(null);setLogoutError(false);navigate('/');}
- catch{setLogoutError(true);}};
+ const loggingOut=useRef(false);
+ const value={initial,lang,t,theme,user,setUser:acceptUser,sessionReady,sessionError,loadSession,cart,cartReady,notify,add:item=>{
+  const accepted=add(item);
+  if(accepted)notify('Added to cart','تمت الإضافة إلى السلة');
+  else notify('Cart quantity limit reached','تم بلوغ الحد المتاح في السلة',true);
+  return accepted;
+ },remove:index=>{remove(index);notify('Item removed','تم حذف المنتج');},updateQty,quantityLimit,replaceArtwork,setCart:commitCart,config,categories,refreshCategories};
+ const closeSession=async()=>{
+  if(loggingOut.current)return;
+  loggingOut.current=true;
+  try{
+   await api('/auth/logout',{method:'POST'});
+   acceptUser(null);setLogoutError(false);notify('Signed out','تم تسجيل الخروج');navigate('/');
+  }catch{setLogoutError(true);notify('Could not sign out. Try again.','تعذّر تسجيل الخروج. حاول مرة تانية.',true);}
+  finally{loggingOut.current=false;}
+ };
  return <Store.Provider value={value}>
   <a className="skip-link" href="#main">{lang==='ar'?'تخطي إلى المحتوى':'Skip to content'}</a>
   <header className="site-header">
+   <Announcement lang={lang}/>
    <div className="header-inner">
-    <StaggeredMenu links={[...links,{to:'/cart',label:t.cart},...(!user&&sessionReady?[{to:'/login',label:t.signIn}]:[])]} lang={lang} t={t} theme={theme} onLanguage={changeLanguage} onTheme={changeTheme} onLogout={user?closeSession:null} categoryLabel={t.categories} categoryLinks={categories.map(c=>({to:'/shop?category='+c.slug,label:label(c.name,lang)}))}/>
-    <Link className="brand" to="/" aria-label={lang==='ar'?'جاليرمو، الرئيسية':'Gallermo Store home'}><img src="/gallermo-logo.webp" alt="" width="52" height="52"/></Link>
+    <Link className="brand" to="/" aria-label={lang==='ar'?'جاليرمو، الرئيسية':'Gallermo Store home'}><img src="/gallermo-logo-small.webp" alt="" width="52" height="52"/></Link>
     <nav className="desktop-nav" aria-label={lang==='ar'?'التنقل الرئيسي':'Main navigation'}>
       <NavLink to="/" end>{t.home}</NavLink><NavLink to="/shop">{t.shop}</NavLink>
       <div className="categories-dropdown"><button type="button" aria-label={t.categories} aria-haspopup="true">{t.categories}<ChevronDown size={15}/></button><div className="categories-menu">{categories.map(c=><Link key={c.slug} to={'/shop?category='+c.slug}>{label(c.name,lang)}</Link>)}</div></div>
@@ -182,11 +204,12 @@ export default function App({initial={}}){
      <button type="button" className="icon-button" onClick={changeTheme} aria-label={theme==='light'?t.dark:t.light} title={theme==='light'?t.dark:t.light}>{theme==='light'?<Moon size={19}/>:<Sun size={19}/>}</button>
      {user?<button type="button" className="icon-button auth-icon" onClick={closeSession} aria-label={t.logout} title={t.logout}><UserRound size={19}/></button>:sessionReady?<Link className="icon-button auth-icon" to="/login" aria-label={t.signIn} title={t.signIn}><UserRound size={19}/></Link>:null}
      <Link className="icon-button nav-cart" to="/cart" aria-label={`${t.cart}: ${count}`}><ShoppingBag size={20} id="nav-cart-icon"/>{count>0&&<span className="cart-count">{count}</span>}</Link>
+     <StaggeredMenu links={links} signIn={!user&&sessionReady} lang={lang} t={t} onLogout={user?closeSession:null} categoryLabel={t.categories} categoryLinks={categories.map(c=>({to:'/shop?category='+c.slug,label:label(c.name,lang)}))}/>
     </div>
    </div>
   </header>
   {logoutError&&<RetryState lang={lang} onRetry={closeSession}/>}
-  <main id="main"><Routes future={{v7_relativeSplatPath:true}}>
+  <main id="main"><Routes>
     <Route path="/" element={<Home/>}/><Route path="/shop" element={<Shop/>}/><Route path="/product/:slug" element={<ProductPage/>}/>
     <Route path="/bundle/:slug" element={<BundlePage/>}/><Route path="/cart" element={<CartPage/>}/><Route path="/checkout" element={<CheckoutPage/>}/><Route path="/order-confirmed/:number" element={<OrderThankYou/>}/>
     <Route path="/track-order" element={<TrackPage/>}/><Route path="/account/orders" element={<MyOrdersPage/>}/>
@@ -194,5 +217,13 @@ export default function App({initial={}}){
     <Route path="/admin" element={<AdminRoute/>}/><Route path="/contact" element={<Information/>}/><Route path="/information/:page" element={<Information/>}/><Route path="*" element={<NotFound/>}/>
    </Routes></main>
   <Footer/>
+  <div className="toast-stack">
+    <div role="status" className="sr-only">{toast&&!toast.error&&(lang==='ar'?toast.ar:toast.en)}</div>
+    <div role="alert" className="sr-only">{toast?.error&&(lang==='ar'?toast.ar:toast.en)}</div>
+    {toast&&<div key={toast.id} className={'store-toast'+(toast.error?' toast-error':'')}>
+      <p>{lang==='ar'?toast.ar:toast.en}</p>
+      <button type="button" aria-label={lang==='ar'?'إغلاق الإشعار':'Dismiss notification'} onClick={()=>setToast(null)}><X size={17} aria-hidden="true"/></button>
+    </div>}
+  </div>
  </Store.Provider>;
 }

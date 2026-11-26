@@ -1,7 +1,6 @@
 import {createHash, randomBytes} from 'node:crypto';
-import {mkdir,writeFile,unlink,lstat} from 'node:fs/promises';
-import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {pipeline} from 'node:stream/promises';
+import {getStorage,r2Config,storageDriver} from './storage.js';
 import express from 'express';
 import {rateLimit} from 'express-rate-limit';
 import sharp from 'sharp';
@@ -13,7 +12,9 @@ const root=()=>process.env.NODE_ENV==='test'&&process.env.GALLERMO_TEST_PRIVATE_
 const maxBytes=10*1024*1024;
 const lifetime=24*60*60*1000;
 const assetId=/^[a-f0-9]{48}$/;
-export const privateStorageAvailable=()=>process.env.NODE_ENV!=='production'&&process.env.LOCAL_PRIVATE_UPLOADS==='true';
+export const privateStorageAvailable=()=>storageDriver()==='r2'?!!r2Config():
+  storageDriver()==='local'&&process.env.NODE_ENV!=='production'&&process.env.LOCAL_PRIVATE_UPLOADS==='true';
+const storageKey=asset=>asset.purpose+'/'+asset._id+'.webp';
 export function commerceError(status,code,message){
   return Object.assign(new Error(message),{status,code});
 }
@@ -72,19 +73,20 @@ privateFiles.post('/:purpose',uploadAvailable,rateLimit({windowMs:15*60*1000,lim
     }
     const {data,width,height}=await normalizeImage(req.body);
     const id=randomBytes(24).toString('hex');
-    await mkdir(root(),{recursive:true,mode:0o700});
-    const file=path.join(root(),id+'.webp');
-    await writeFile(file,data,{flag:'wx',mode:0o600});
+    const driver=storageDriver();
+    const storage=getStorage(driver);
+    const key=storageKey({_id:id,purpose});
+    await storage.put('private',key,data);
     try{
-      await PrivateAsset.create({_id:id,owner,purpose,productSlug,variantSku,width,height,expiresAt:new Date(Date.now()+lifetime)});
+      await PrivateAsset.create({_id:id,owner,purpose,driver,productSlug,variantSku,width,height,expiresAt:new Date(Date.now()+lifetime)});
     }catch(error){
-      await unlink(file).catch(()=>{});
+      await storage.remove('private',key).catch(()=>{console.warn('[storage] private upload cleanup failed');});
       throw error;
     }
     res.status(201).json({id,width,height});
   })
 );
-privateFiles.get('/:id',uploadAvailable,wrapped(async(req,res)=>{
+privateFiles.get('/:id',wrapped(async(req,res)=>{
   const {id}=req.params;
   if(!assetId.test(id))return res.sendStatus(404);
   const asset=await PrivateAsset.findById(id).lean();
@@ -94,31 +96,39 @@ privateFiles.get('/:id',uploadAvailable,wrapped(async(req,res)=>{
     : asset.purpose==='artwork'&&asset.owner===commerceOwner(req,res)&&
       (asset.orderNumber||asset.expiresAt>new Date());
   if(!allowed)return res.sendStatus(404);
-  res.type('image/webp').sendFile(path.join(root(),id+'.webp'),{cacheControl:false},error=>{
-    if(error&&!res.headersSent)res.sendStatus(404);
-  });
+  if((asset.driver||'local')==='local'&&process.env.NODE_ENV==='production')return res.sendStatus(404);
+  const storage=getStorage(asset.driver||'local');
+  const key=storageKey(asset);
+  if(!(await storage.head('private',key)))return res.sendStatus(404);
+  const stream=await storage.stream('private',key);
+  res.type('image/webp');
+  await pipeline(stream,res);
 }));
 
 export async function checkAsset(id,criteria,session){
   if(!assetId.test(id||'')||!privateStorageAvailable())
     throw commerceError(409,'UPLOAD_UNAVAILABLE','The required image is unavailable');
-  const asset=await PrivateAsset.findOne({_id:id,...criteria,orderNumber:null,expiresAt:{$gt:new Date()}}).session(session).lean();
+  const asset=await PrivateAsset.findOne({_id:id,...criteria,orderNumber:null,cleanupClaimed:{$ne:true},expiresAt:{$gt:new Date()}}).session(session).lean();
   if(!asset)throw commerceError(409,'UPLOAD_UNAVAILABLE','The required image is unavailable');
-  const file=await lstat(path.join(root(),id+'.webp')).catch(()=>null);
-  if(!file?.isFile()||file.size===0)
+  const file=await getStorage(asset.driver||'local').head('private',storageKey(asset));
+  if(!file?.ContentLength)
     throw commerceError(409,'UPLOAD_UNAVAILABLE','The required image is unavailable');
   return asset;
 }
 export async function bindAsset(asset,number,session){
-  const update=await PrivateAsset.updateOne({_id:asset._id,orderNumber:null,expiresAt:{$gt:new Date()}},{$set:{orderNumber:number}},{session});
+  const update=await PrivateAsset.updateOne({_id:asset._id,orderNumber:null,cleanupClaimed:{$ne:true},expiresAt:{$gt:new Date()}},{$set:{orderNumber:number}},{session});
   if(!update.modifiedCount)throw commerceError(409,'UPLOAD_UNAVAILABLE','The required image is unavailable');
 }
 export async function removeExpiredAssets(now=new Date()){
-  const expired=await PrivateAsset.find({orderNumber:null,expiresAt:{$lte:now}}).select('_id').limit(500).lean();
-  for(const {_id} of expired){
-    if(!assetId.test(_id))continue;
-    const removed=await PrivateAsset.deleteOne({_id,orderNumber:null,expiresAt:{$lte:now}});
-    if(removed.deletedCount)await unlink(path.join(root(),_id+'.webp')).catch(error=>{if(error.code!=='ENOENT')throw error;});
+  const expired=await PrivateAsset.find({orderNumber:null,expiresAt:{$lte:now}}).select('_id purpose driver').limit(500).lean();
+  for(const asset of expired){
+    if(!assetId.test(asset._id))continue;
+    // Claim the record before deleting bytes so an in-flight order cannot bind it.
+    const claim={_id:asset._id,orderNumber:null,expiresAt:{$lte:now}};
+    const claimed=await PrivateAsset.findOneAndUpdate(claim,{$set:{cleanupClaimed:true}}).lean();
+    if(!claimed)continue;
+    await getStorage(asset.driver||'local').remove('private',storageKey(asset));
+    await PrivateAsset.deleteOne({...claim,cleanupClaimed:true});
   }
   return expired.length;
 }

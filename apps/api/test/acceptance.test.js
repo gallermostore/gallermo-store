@@ -39,7 +39,7 @@ function client(){
   return {status:response.status,data:response.headers.get('content-type')?.includes('json')?await response.json():null};
  };
 }
-const quote=(buyer,lines,discountCode)=>buyer('/orders/quote',{lines,discountCode,governorate:'Cairo'});
+const quote=(buyer,lines,discountCode)=>buyer('/orders/quote',{lines,discountCode,governorate:'cairo'});
 const order=(lines,quote,other={})=>({idempotencyKey:randomUUID(),lines,customer:address,quoteToken:quote.data.quoteToken,paymentMethod:'cod',...other});
 const uploadArtwork=buyer=>buyer('/private/artwork?'+new URLSearchParams({slug:first.slug,sku:trackedSku}),image);
 async function customer(label){

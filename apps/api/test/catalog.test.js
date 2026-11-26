@@ -1,10 +1,13 @@
 import test from 'node:test';
+import sharp from 'sharp';
 import assert from 'node:assert/strict';
 import {readFileSync,existsSync} from 'node:fs';
 const data=JSON.parse(readFileSync(new URL('../../../data/catalog.seed.json',import.meta.url),'utf8'));
 const root=new URL('../../web/public/',import.meta.url);
 test('336 distinct catalog design images across 7 publishable image categories',()=>{
  assert.equal(data.products.length,336);
+ assert.equal(data.products.reduce((count,p)=>count+p.variants.length,0),1789);
+ assert.equal(data.categories.length,8);
  assert.equal(new Set(data.products.map(p=>p.slug)).size,336);
  assert.equal(data.categories.filter(c=>c.published).length,7);
 });
@@ -30,4 +33,14 @@ test('every supplied price group has the expected price options',()=>{
   assert.deepEqual(p.variants.map(v=>v.priceEGP),prices,key);
  }
  assert.deepEqual(data.products.find(x=>x.categorySlug==='laptop-sleeves').addons.map(x=>x.priceEGP),[100]);
+});
+
+test('approved homepage assets and frame chart are valid WebP files',async()=>{
+ const hero=[['hero/gallermo-hero-desktop.webp',16/7],['hero/gallermo-hero-mobile.webp',3/4]];
+ const categories=data.categories.filter(c=>c.published).map(c=>['categories/'+c.slug+'.webp',1]);
+ for(const [file,ratio] of [...hero,...categories,['size-charts/frames-sizechart.webp',null]]){
+   const {format,width,height}=await sharp(readFileSync(new URL(file,root))).metadata();
+   assert.equal(format,'webp',file);
+   if(ratio)assert.ok(Math.abs(width/height-ratio)<.015,file);
+ }
 });

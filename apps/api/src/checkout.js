@@ -8,7 +8,10 @@ import {categoryPolicy,publicProduct,slug} from './catalog.js';
 import {safeParse,requireRole} from './security.js';
 import {bindAsset,checkAsset,commerceError,commerceOwner,privateStorageAvailable} from './private-assets.js';
 
-const secret=crypto.randomBytes(32);
+import {enqueueOrderNotification} from './email.js';
+import {governorates,shippingZone} from './shipping.js';
+
+import {checkoutLaunchReady,quoteSecret} from './checkout-readiness.js';
 const duration=10*60*1000;
 const imageId=z.string().regex(/^[a-f0-9]{48}$/);
 const reference=z.string().trim().toUpperCase().regex(/^[A-Z0-9-]{4,48}$/).transform(value=>value.replaceAll('-','')).pipe(z.string().min(4));
@@ -22,7 +25,7 @@ const customerSchema=z.object({
 }).strict();
 const quoteSchema=z.object({lines:z.array(lineSchema).min(1).max(30),discountCode:z.string().trim().max(30).optional(),governorate:z.string().trim().min(2).max(70)}).strict();
 const submitSchema=quoteSchema.omit({governorate:true}).extend({
-  customer:customerSchema,idempotencyKey:z.string().uuid(),quoteToken:z.string().regex(/^\d{13}\.[a-zA-Z0-9_-]{43}$/),
+  customer:customerSchema,locale:z.enum(['en','ar']).optional(),idempotencyKey:z.string().uuid(),quoteToken:z.string().regex(/^\d{13}\.[a-zA-Z0-9_-]{43}$/),
   paymentMethod:z.enum(['cod','instapay','instapay_deposit']),paymentProofId:imageId.optional(),paymentReference:reference.optional()
 }).strict();
 const paymentSchema=z.object({paymentReference:reference,paymentProofId:imageId}).strict();
@@ -31,33 +34,61 @@ const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
 const safetyLimit=2700000000;
 const fail=(code,message,status=409)=>{throw commerceError(status,code,message);};
 
-function shippingConfig(){
-  const fee=process.env.SHIPPING_FEE_EGP;
-  const governorates=(process.env.LOCAL_SHIPPING_GOVERNORATES||'').split(',').map(value=>value.trim()).filter(Boolean);
-  return fee&&/^\d{1,6}$/.test(fee)&&governorates.length?{fee:Number(fee)*100,governorates}:null;
+export async function commerceConfig({fresh=false}={}){
+  const checkoutEnabled=process.env.NODE_ENV==='production'?await checkoutLaunchReady({fresh}):
+    process.env.CHECKOUT_ENABLED==='true'&&privateStorageAvailable()&&(quoteSecret()?.length??0)>=32;
+  return {checkoutEnabled,currency:'EGP',customizationAvailable:privateStorageAvailable(),governorates};
 }
-export function commerceConfig(){
-  const shipping=shippingConfig();
-  const checkoutEnabled=process.env.NODE_ENV!=='production'&&process.env.CHECKOUT_ENABLED==='true'&&privateStorageAvailable()&&!!shipping;
-  return {checkoutEnabled,currency:'EGP',customizationAvailable:privateStorageAvailable(),governorates:checkoutEnabled?shipping.governorates:[]};
+function requireCheckout(req,_res,next){
+  commerceConfig({fresh:req.path==='/'}).then(config=>{
+    next(config.checkoutEnabled?undefined:commerceError(503,'CHECKOUT_DISABLED','Checkout is temporarily unavailable'));
+  },next);
 }
-function requireCheckout(_req,_res,next){
-  next(commerceConfig().checkoutEnabled?undefined:commerceError(503,'CHECKOUT_DISABLED','Checkout is not enabled yet'));
+
+export function allocatePiastres(amount,weights){
+  const sum=weights.reduce((total,weight)=>total+BigInt(weight),0n);
+  if(sum===0n)return weights.map(()=>0);
+  const shares=weights.map((weight,index)=>{
+    const numerator=BigInt(amount)*BigInt(weight);
+    return {index,share:Number(numerator/sum),remainder:numerator%sum};
+  });
+  const remaining=amount-shares.reduce((total,item)=>total+item.share,0);
+  const ranked=[...shares].sort((a,b)=>a.remainder===b.remainder?a.index-b.index:a.remainder>b.remainder?-1:1);
+  for(const item of ranked.slice(0,remaining))item.share++;
+  return shares.map(item=>item.share);
 }
-export function paymentPlans(totalPiastres,requiresPrepayment){
-  const upfront=requiresPrepayment?Math.ceil(totalPiastres/2):0;
-  return requiresPrepayment
-    ? [{method:'instapay_deposit',requiredUpfrontPiastres:upfront,balancePiastres:totalPiastres-upfront}]
-    : [{method:'cod',requiredUpfrontPiastres:0,balancePiastres:totalPiastres},{method:'instapay',requiredUpfrontPiastres:totalPiastres,balancePiastres:0}];
+
+export function paymentPlans(totalPiastres,requiresPrepayment,depositBasisPiastres){
+  const upfront=Math.ceil(depositBasisPiastres/2);
+  const first=requiresPrepayment
+    ? {method:'instapay_deposit',requiredUpfrontPiastres:upfront,balancePiastres:totalPiastres-upfront}
+    : {method:'cod',requiredUpfrontPiastres:0,balancePiastres:totalPiastres};
+  return [first,{method:'instapay',requiredUpfrontPiastres:totalPiastres,balancePiastres:0}];
 }
-export function moneyTotals(subtotal,discount,shipping,requiresPrepayment){
+
+export function moneyTotals(subtotal,discount,shipping,requiresPrepayment,lines){
   const deduction=discount?Math.min(subtotal,discount.kind==='percent'
     ? Math.floor((subtotal*Math.round(discount.amount*100)+5000)/10000)
     : Math.round(discount.amount*100)):0;
+  const lineDiscounts=allocatePiastres(deduction,lines.map(line=>Math.round(line.lineTotalEGP*100)));
+  let depositBasisPiastres=0;
+  const snapshots=lines.map((line,index)=>{
+    const discountPiastres=lineDiscounts[index];
+    if(line.kind==='product'){
+      if(line.category.requiresPrepayment)depositBasisPiastres+=Math.round(line.lineTotalEGP*100)-discountPiastres;
+      return {...line,discountPiastres};
+    }
+    const componentDiscounts=allocatePiastres(discountPiastres,line.components.map(item=>item.allocatedPiastres));
+    const components=line.components.map((item,i)=>{
+      if(item.category.requiresPrepayment)depositBasisPiastres+=item.allocatedPiastres-componentDiscounts[i];
+      return {...item,discountPiastres:componentDiscounts[i]};
+    });
+    return {...line,discountPiastres,components};
+  });
   const total=subtotal-deduction+shipping;
   return {
     subtotalEGP:subtotal/100,discountEGP:deduction/100,shippingEGP:shipping/100,totalEGP:total/100,totalPiastres:total,currency:'EGP',
-    requiresPrepayment,plans:paymentPlans(total,requiresPrepayment)
+    requiresPrepayment,depositBasisPiastres,plans:paymentPlans(total,requiresPrepayment,depositBasisPiastres),lines:snapshots
   };
 }
 async function resolveCart(lines,owner,session){
@@ -86,6 +117,7 @@ async function resolveCart(lines,owner,session){
   }
   for(const line of lines){
     let snapshot;
+    const componentWeights=[];
     if(line.kind==='product'){
       const {product,variant,policy}=await resolve(line.slug,line.variantSku,line.quantity);
       const addons=line.addons.map(code=>product.addons.find(addon=>addon.code===code));
@@ -105,21 +137,27 @@ async function resolveCart(lines,owner,session){
       if(!bundle?.items.length)fail('BUNDLE_UNAVAILABLE','A bundle is unavailable');
       const components=[];
       for(const item of bundle.items){
-        const {policy}=await resolve(item.productSlug,item.variantSku,item.quantity*line.quantity);
+        const {policy,variant}=await resolve(item.productSlug,item.variantSku,item.quantity*line.quantity);
+        componentWeights.push(Math.round(variant.priceEGP*100)*item.quantity);
         components.push({slug:item.productSlug,sku:item.variantSku,quantity:item.quantity,category:policy});
       }
       snapshot={kind:'bundle',slug:bundle.slug,title:bundle.name.en,unitPriceEGP:bundle.priceEGP,components};
     }
     const lineTotal=Math.round(snapshot.unitPriceEGP*100)*line.quantity;
     if(!Number.isSafeInteger(lineTotal)||lineTotal<0||subtotal+lineTotal>safetyLimit)fail('INVALID_TOTAL','The order total is outside the supported range');
+    if(snapshot.components){
+      const weights=componentWeights.some(Boolean)?componentWeights:snapshot.components.map(item=>item.quantity);
+      const allocation=allocatePiastres(lineTotal,weights);
+      snapshot.components.forEach((item,i)=>{item.allocatedPiastres=allocation[i];});
+    }
     subtotal+=lineTotal;
     result.push({...snapshot,quantity:line.quantity,lineTotalEGP:lineTotal/100});
   }
   return {subtotal,requiresPrepayment,result,stocks:[...stocks.values()],assets:[...assets.values()]};
 }
 async function calculate({lines,discountCode,governorate},owner,session){
-  const shipping=shippingConfig();
-  if(!shipping?.governorates.includes(governorate))fail('SHIPPING_UNAVAILABLE','Shipping is unavailable for that governorate',400);
+  const shipping=shippingZone(governorate);
+  if(!shipping)fail('SHIPPING_UNAVAILABLE','Shipping is unavailable for that governorate',400);
   const {subtotal,requiresPrepayment,result,stocks,assets}=await resolveCart(lines,owner,session);
   let discount=null;
   if(discountCode){
@@ -129,12 +167,12 @@ async function calculate({lines,discountCode,governorate},owner,session){
       fail('DISCOUNT_UNAVAILABLE','The discount code is unavailable');
   }
   return {
-    quote:{...moneyTotals(subtotal,discount,shipping.fee,requiresPrepayment),lines:result,discountCode:discount?.code||'',governorate},
+    quote:{...moneyTotals(subtotal,discount,shipping.shippingPiastres,requiresPrepayment,result),discountCode:discount?.code||'',governorate},
     discount,stocks,assets
   };
 }
 function signedQuote(quote,owner,expires){
-  return expires+'.'+crypto.createHmac('sha256',secret).update(JSON.stringify([owner,expires,quote])).digest('base64url');
+  return expires+'.'+crypto.createHmac('sha256',quoteSecret()).update(JSON.stringify([owner,expires,quote])).digest('base64url');
 }
 function requireMatchingQuote(quote,owner,received){
   const expires=Number(received.split('.')[0]);
@@ -218,10 +256,13 @@ checkout.post('/',requireCheckout,submissionLimit,wrapped(async(req,res)=>{
       }
       const [created]=await Order.create([{
         ...quote,number,ownerKey:owner,requestFingerprint:fingerprint,idempotencyKey,discountId:discount?._id,stockReservations:stocks,
-        customer:body.customer,userId:req.user?.id||null,paymentMethod:plan.method,paymentStatus:transfer?'proof_submitted':plan.method==='cod'?'unpaid':'verified',
+        customer:body.customer,locale:body.locale||'en',userId:req.user?.id||null,paymentMethod:plan.method,paymentStatus:transfer?'proof_submitted':plan.method==='cod'?'unpaid':'not_required',
         requiredUpfrontPiastres:plan.requiredUpfrontPiastres,verifiedPiastres:0,balancePiastres:quote.totalPiastres,
         paymentReference:body.paymentReference,paymentProofKey:proof?._id,events:[{status:'pending',note:'Order received'}]
       }],{session});
+      await enqueueOrderNotification(created,'received',0,session);
+      if(transfer)await enqueueOrderNotification(created,'proof_submitted',0,session);
+      await enqueueOrderNotification(created,'admin',0,session,true);
       return created;
     });
     res.status(201).json(receipt(order));
@@ -250,6 +291,7 @@ checkout.post('/:number/payment',requireCheckout,submissionLimit,wrapped(async(r
     order.paymentProofKey=proof._id;
     order.paymentStatus='proof_submitted';
     order.events.push({status:'proof_submitted',note:'Replacement evidence received'});
+    await enqueueOrderNotification(order,'proof_submitted',order.events.length,session);
     return order.save({session});
   });
   res.json(receipt(updated));
@@ -278,9 +320,11 @@ adminOrderChanges.patch('/:id',requireRole('admin'),wrapped(async(req,res)=>{
       }
       order.paymentStatus=body.paymentStatus;
     }
-    if(body.status&&body.status!==order.status){
+    const changed=body.status&&body.status!==order.status;
+    if(changed){
       if(!transitions[order.status]?.includes(body.status))fail('INVALID_STATUS','That order status transition is unavailable');
-      if(body.status!=='cancelled'&&order.paymentMethod!=='cod'&&
+      const noTransferDue=order.paymentMethod==='instapay_deposit'&&order.paymentStatus==='not_required'&&order.requiredUpfrontPiastres===0;
+      if(body.status!=='cancelled'&&order.paymentMethod!=='cod'&&!noTransferDue&&
         (order.paymentStatus!=='verified'||order.requiredUpfrontPiastres!=null&&!(order.verifiedPiastres>=order.requiredUpfrontPiastres)))
         fail('PAYMENT_REQUIRED','Verify the minimum payment before fulfillment');
       if(body.status==='delivered'&&order.balancePiastres>0){
@@ -292,7 +336,9 @@ adminOrderChanges.patch('/:id',requireRole('admin'),wrapped(async(req,res)=>{
       if(body.status==='cancelled')await releaseInventory(order,session);
       order.status=body.status;
     }
-    order.events.push({status:body.status||body.paymentStatus,note:'Changed by administrator'});
+    order.events.push({status:changed?body.status:body.paymentStatus||order.status,note:'Changed by administrator'});
+    if(body.paymentStatus)await enqueueOrderNotification(order,body.paymentStatus,order.events.length,session);
+    if(changed)await enqueueOrderNotification(order,body.status,order.events.length,session);
     return order.save({session});
   });
   res.json(saved);

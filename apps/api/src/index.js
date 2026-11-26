@@ -6,7 +6,10 @@ import cookieParser from 'cookie-parser';
 import {rateLimit} from 'express-rate-limit';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import {commerceOwner,privateFiles} from './private-assets.js';
+import {startEmailWorker} from './email.js';
+import {pipeline} from 'node:stream/promises';
+import {getStorage,isAdminMediaKey,isPublicMediaUrl,digest} from './storage.js';
+import {commerceOwner,privateFiles,normalizeImage} from './private-assets.js';
 import {checkout,adminOrderChanges,commerceConfig} from './checkout.js';
 import {pathToFileURL} from 'node:url';
 import {slug,categoryRules,categoryPolicy,catalogSchema,listProducts,findProduct,relatedProducts,bestsellers,publicBundles} from './catalog.js';
@@ -37,14 +40,14 @@ app.use(['/api/auth','/api/orders','/api/admin','/api/private'],(_req,res,next)=
 const wrap=(fn)=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
 const bilingual=z.object({en:z.string().min(1).max(180),ar:z.string().max(180).default('')});
 const desc=z.object({en:z.string().max(2500).default(''),ar:z.string().max(2500).default('')}).optional();
-const image=z.object({url:z.string().startsWith('/catalog/'),alt:z.string().max(160).default('')});
+const image=z.object({url:z.string().max(300).refine(isPublicMediaUrl),alt:z.string().max(160).default('')});
 const productSchema=z.object({slug,name:bilingual,description:desc,categorySlug:slug,images:z.array(image).max(8).default([]),variants:z.array(z.object({sku:z.string().min(2).max(80),label:z.string().min(1).max(100),priceEGP:z.number().int().min(0).max(1000000),stock:z.number().int().min(0).nullable().default(null)})).min(1).max(25),addons:z.array(z.object({code:z.string(),label:bilingual,priceEGP:z.number().int().min(0)})).max(10).default([]),published:z.boolean().default(false),featured:z.boolean().default(false)}).strict();
-const categorySchema=z.object({slug,name:bilingual,description:desc,published:z.boolean().default(false),sortOrder:z.number().int().default(0),image:z.string().startsWith('/catalog/').optional(),...categoryRules}).strict();
+const categorySchema=z.object({slug,name:bilingual,description:desc,published:z.boolean().default(false),sortOrder:z.number().int().default(0),image:z.string().max(300).refine(isPublicMediaUrl).optional(),...categoryRules}).strict();
 const bundleSchema=z.object({slug,name:bilingual,description:desc,items:z.array(z.object({productSlug:slug,variantSku:z.string().min(1),quantity:z.number().int().min(1).max(10)})).min(1).max(20),priceEGP:z.number().int().min(0),images:z.array(image).max(8).default([]),published:z.boolean().default(false)}).strict();
 const codeSchema=z.object({code:z.string().min(3).max(30).regex(/^[A-Z0-9_-]+$/),kind:z.enum(['percent','fixed']),amount:z.number().min(0),minimumEGP:z.number().min(0).default(0),maxUses:z.number().int().min(0).nullable().default(null),enabled:z.boolean().default(false),expiresAt:z.coerce.date().nullable().optional()}).strict();
 const registerSchema=z.object({name:z.string().trim().min(2).max(80),email:z.string().trim().email().max(160),password:z.string().min(12).max(72).refine(value=>Buffer.byteLength(value,'utf8')<=72)}).strict();
 const loginSchema=registerSchema.pick({email:true}).extend({password:z.string().min(1).max(128)});
-app.get('/api/config',(_req,res)=>res.json(commerceConfig()));
+app.get('/api/config',wrap(async(_req,res)=>res.set('Cache-Control','no-store').json(await commerceConfig())));
 app.get('/api/categories',wrap(async(_req,res)=>{
  const categories=await Category.find({published:true}).sort({sortOrder:1,_id:1}).lean();
  res.json(categories.map(category=>({...category,...categoryPolicy(category)})));
@@ -94,13 +97,29 @@ app.get('/api/orders/mine',requireRole('customer'),wrap(async(req,res)=>res.json
 app.post('/api/orders/track',wrap(async(req,res)=>{
  if(req.user)return res.status(403).json({error:'Guest tracking only'});
  const body=safeParse(z.object({number:z.string().min(8).max(40),phone:z.string().min(10).max(20)}),req.body);
- const o=await Order.findOne({number:body.number.trim().toUpperCase(),userId:null,'customer.phone':body.phone.trim()}).select('number status paymentStatus createdAt ownerKey').lean();
+ const o=await Order.findOne({number:body.number.trim().toUpperCase(),userId:null,'customer.phone':body.phone.trim()}).select('number status paymentStatus createdAt ownerKey paymentMethod requiredUpfrontPiastres verifiedPiastres balancePiastres totalEGP').lean();
  if(!o)return res.status(404).json({error:'No matching order'});
  const {ownerKey,...tracking}=o;
  res.json({...tracking,canReplacePayment:!!ownerKey&&ownerKey===commerceOwner(req,res)&&o.paymentStatus==='rejected'});
 }));
 
+app.get('/api/media/:key',wrap(async(req,res)=>{
+ const {key}=req.params;
+ if(!isAdminMediaKey(key)||!(await getStorage('local').head('public',key)))return res.sendStatus(404);
+ res.type('image/webp').set('Cache-Control','public,max-age=31536000,immutable');
+ await pipeline(getStorage('local').stream('public',key),res);
+}));
 app.use('/api/admin',requireRole('admin'));
+app.post('/api/admin/media',express.raw({type:['image/jpeg','image/png','image/webp','application/octet-stream'],limit:'10mb'}),
+ wrap(async(req,res)=>{
+  const {data}=await normalizeImage(req.body);
+  const key='catalog/admin/'+digest(data)+'.webp';
+  const storage=getStorage();
+  const existing=await storage.head('public',key);
+  if(!existing)await storage.put('public',key,data);
+  res.status(201).json({url:storage.publicUrl(key)});
+ }));
+
 const adminModels={products:{model:Product,schema:productSchema},categories:{model:Category,schema:categorySchema},bundles:{model:Bundle,schema:bundleSchema},codes:{model:Discount,schema:codeSchema}};
 for(const [key,{model,schema}] of Object.entries(adminModels)){
  const path='/api/admin/'+key;
@@ -132,14 +151,15 @@ for(const [key,{model,schema}] of Object.entries(adminModels)){
 }
 app.get('/api/admin/orders',wrap(async(_req,res)=>res.json(await Order.find().sort({createdAt:-1}).limit(500).lean())));
 app.use('/api/admin/orders',adminOrderChanges);
-app.use((err,req,res,_next)=>{
+app.use((err,req,res,next)=>{
+ if(res.headersSent||res.destroyed)return next(err);
  if(err.code===11000)return res.status(409).json({error:'Duplicate record'});
  if(err.name==='CastError')return res.status(400).json({error:'Invalid identifier'});
  if(err.name==='ValidationError')return res.status(400).json({error:'Validation failed'});
  const unavailable=/^Mongo(Network|ServerSelection|PoolCleared)/.test(err.name)||err.code===50;
  const status=unavailable?503:err.status||500;
  if(status>=500)console.error('[api]',req.method,req.route?.path||req.path.split('/').slice(0,3).join('/'),err.name,err.code||'');
- res.status(status).json({code:typeof err.code==='string'&&err.status?err.code:undefined,error:status===503&&!err.status?'Store data is temporarily unavailable':status>=500&&!err.status?'Unexpected server error':err.message,details:status<500?err.details:undefined});
+ res.status(status).json({code:unavailable?'DATABASE_UNAVAILABLE':typeof err.code==='string'&&err.status?err.code:undefined,error:status===503&&!err.status?'Store data is temporarily unavailable':status>=500&&!err.status?'Unexpected server error':err.message,details:status<500?err.details:undefined});
 });
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
  const uri = process.env.MONGODB_URI;
@@ -158,5 +178,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
    setTimeout(connect,10000).unref();
   }
  };
+ startEmailWorker();
  void connect();
 }

@@ -13,17 +13,26 @@ export const User = model('User',new Schema({name:{type:String,required:true},em
 export const Session = model('Session',new Schema({userId:{type:Schema.Types.ObjectId,ref:'User',required:true},tokenHash:{type:String,required:true,unique:true},expiresAt:{type:Date,required:true}},{timestamps:true}));
 Session.schema.index({expiresAt:1},{expireAfterSeconds:0});
 const categorySnapshot=new Schema({slug:String,requiresPrepayment:Boolean,customizationEnabled:Boolean},{_id:false});
-const componentSnapshot=new Schema({slug:String,sku:String,quantity:Number,category:categorySnapshot},{_id:false});
+const componentSnapshot=new Schema({slug:String,sku:String,quantity:Number,allocatedPiastres:Number,discountPiastres:Number,category:categorySnapshot},{_id:false});
 const artworkSnapshot=new Schema({assetId:String,width:Number,height:Number},{_id:false});
 const stockReservation=new Schema({productId:Schema.Types.ObjectId,sku:String,quantity:Number},{_id:false});
-const orderLine = new Schema({kind:{type:String,enum:['product','bundle']},slug:String,title:String,variantSku:String,variantLabel:String,addons:[String],unitPriceEGP:Number,quantity:Number,lineTotalEGP:Number,category:categorySnapshot,components:{type:[componentSnapshot],default:undefined},customization:artworkSnapshot},{_id:false});
-export const Order = model('Order',new Schema({number:{type:String,unique:true,required:true},userId:{type:Schema.Types.ObjectId,ref:'User',default:null,index:true},customer:{name:String,email:String,phone:String,governorate:String,address:String,notes:String},lines:[orderLine],subtotalEGP:Number,discountEGP:Number,shippingEGP:Number,totalEGP:Number,discountCode:String,paymentMethod:{type:String,enum:['cod','instapay','instapay_deposit']},paymentStatus:{type:String,enum:['unpaid','awaiting_transfer','proof_submitted','verified','rejected'],default:'unpaid'},paymentReference:String,paymentProofKey:String,requiredUpfrontPiastres:Number,verifiedPiastres:Number,balancePiastres:Number,collectedAtDeliveryPiastres:Number,totalPiastres:Number,currency:String,ownerKey:String,requestFingerprint:String,stockReservations:{type:[stockReservation],default:undefined},inventoryReleasedAt:Date,discountId:Schema.Types.ObjectId,status:{type:String,enum:['pending','confirmed','processing','shipped','delivered','cancelled'],default:'pending'},idempotencyKey:{type:String,unique:true,sparse:true},events:[{status:String,note:String,createdAt:{type:Date,default:Date.now}}]},{timestamps:true}));
+const orderLine = new Schema({kind:{type:String,enum:['product','bundle']},slug:String,title:String,variantSku:String,variantLabel:String,addons:[String],unitPriceEGP:Number,quantity:Number,lineTotalEGP:Number,discountPiastres:Number,category:categorySnapshot,components:{type:[componentSnapshot],default:undefined},customization:artworkSnapshot},{_id:false});
+export const Order = model('Order',new Schema({number:{type:String,unique:true,required:true},userId:{type:Schema.Types.ObjectId,ref:'User',default:null,index:true},customer:{name:String,email:String,phone:String,governorate:String,address:String,notes:String},lines:[orderLine],subtotalEGP:Number,discountEGP:Number,shippingEGP:Number,totalEGP:Number,discountCode:String,paymentMethod:{type:String,enum:['cod','instapay','instapay_deposit']},paymentStatus:{type:String,enum:['unpaid','awaiting_transfer','proof_submitted','verified','rejected','not_required'],default:'unpaid'},paymentReference:String,paymentProofKey:String,requiredUpfrontPiastres:Number,verifiedPiastres:Number,balancePiastres:Number,collectedAtDeliveryPiastres:Number,totalPiastres:Number,depositBasisPiastres:Number,locale:String,currency:String,ownerKey:String,requestFingerprint:String,stockReservations:{type:[stockReservation],default:undefined},inventoryReleasedAt:Date,discountId:Schema.Types.ObjectId,status:{type:String,enum:['pending','confirmed','processing','shipped','delivered','cancelled'],default:'pending'},idempotencyKey:{type:String,unique:true,sparse:true},events:[{status:String,note:String,createdAt:{type:Date,default:Date.now}}]},{timestamps:true}));
 
 export const PrivateAsset = model('PrivateAsset',new Schema({
  _id:String,owner:{type:String,required:true},purpose:{type:String,enum:['artwork','payment'],required:true},
- productSlug:String,variantSku:String,width:Number,height:Number,orderNumber:{type:String,default:null},
+ productSlug:String,variantSku:String,width:Number,height:Number,driver:String,cleanupClaimed:Boolean,orderNumber:{type:String,default:null},
  expiresAt:{type:Date,required:true}
 },{timestamps:true}));
 PrivateAsset.schema.index({orderNumber:1,expiresAt:1});
 export const PaymentReference = model('PaymentReference',new Schema({_id:String,orderNumber:{type:String,required:true}},{timestamps:true}));
 Order.schema.index({status:1,'lines.slug':1});
+
+const notificationSchema=new Schema({
+  _id:String,recipient:{type:String,required:true},locale:String,kind:{type:String,required:true},
+  number:String,status:String,amount:Number,upfront:Number,balance:Number,
+  attempts:{type:Number,default:0},statusOfJob:{type:String,default:'pending'},
+  nextAttemptAt:{type:Date,default:Date.now},leaseToken:String
+},{timestamps:true});
+notificationSchema.index({statusOfJob:1,nextAttemptAt:1});
+export const Notification=model('Notification',notificationSchema);

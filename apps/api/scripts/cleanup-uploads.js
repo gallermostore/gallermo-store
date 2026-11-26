@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import {privateStorageAvailable,removeExpiredAssets} from '../src/private-assets.js';
 
 if(!privateStorageAvailable()||!process.env.MONGODB_URI?.startsWith('mongodb://')){
-  console.error('Local private storage and a standard MongoDB seedlist URI are required.');
+  console.error('Configured private storage and a standard MongoDB seedlist URI are required.');
   process.exitCode=1;
 }else{
   try{

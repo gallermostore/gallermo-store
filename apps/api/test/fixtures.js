@@ -1,7 +1,7 @@
 import {MongoMemoryReplSet} from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import {readFile} from 'node:fs/promises';
-import {Category,Product,Bundle,Discount,User,Order,Session,PrivateAsset,PaymentReference} from '../src/models.js';
+import {Category,Product,Bundle,Discount,User,Order,Session,PrivateAsset,PaymentReference,Notification} from '../src/models.js';
 import {hashPassword} from '../src/security.js';
 
 export const testPassword='fixture-only-gallermo-2026';
@@ -13,14 +13,14 @@ export const trackedSku=first.variants[0].sku;
 export const artLine={kind:'product',slug:first.slug,variantSku:trackedSku,quantity:1};
 export const flagLine={kind:'product',slug:flag.slug,variantSku:flag.variants[0].sku,quantity:1};
 export const fixtureBundle={kind:'bundle',slug:'fixture-bundle',quantity:1};
-export const address={name:'Fixture buyer',email:'buyer@example.invalid',phone:'01012345678',governorate:'Cairo',address:'Fixture street address'};
+export const address={name:'Fixture buyer',email:'buyer@example.invalid',phone:'01012345678',governorate:'cairo',address:'Fixture street address'};
 export const tinyPng=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5ckAAAAASUVORK5CYII=','base64');
-export const models=[Category,Product,Bundle,Discount,User,Order,Session,PrivateAsset,PaymentReference];
+export const models=[Category,Product,Bundle,Discount,User,Order,Session,PrivateAsset,PaymentReference,Notification];
 
 export async function startFixture({origin,full=false}={}){
   Object.assign(process.env,{
-    NODE_ENV:'test',CHECKOUT_ENABLED:'true',LOCAL_PRIVATE_UPLOADS:'true',SHIPPING_FEE_EGP:'30',
-    LOCAL_SHIPPING_GOVERNORATES:'Cairo,Giza',CLIENT_ORIGIN:origin||'http://127.0.0.1:55173'
+    NODE_ENV:'test',EMAIL_ENABLED:'false',STORAGE_DRIVER:'local',CHECKOUT_ENABLED:'true',LOCAL_PRIVATE_UPLOADS:'true',CHECKOUT_QUOTE_SECRET:'fixture-only-stable-quote-secret-32-bytes',
+    CLIENT_ORIGIN:origin||'http://127.0.0.1:55173'
   });
   const repl=await MongoMemoryReplSet.create({binary:{version:'8.2.6'},replSet:{count:1}});
   try {

@@ -1,13 +1,14 @@
 import React,{useState} from 'react';
 import {api,money,useStore} from '../App.jsx';
+import {MutationLabel} from '../components/LoadingState.jsx';
 import {orderError} from './Checkout.jsx';
 
 const statuses={
   pending:['Pending','قيد الانتظار'],confirmed:['Confirmed','مؤكد'],processing:['Processing','قيد التجهيز'],
   shipped:['Shipped','تم الشحن'],delivered:['Delivered','تم التوصيل'],cancelled:['Cancelled','ملغي'],
-  unpaid:['Unpaid','غير مدفوع'],awaiting_transfer:['Awaiting transfer','بانتظار التحويل'],proof_submitted:['Awaiting verification','قيد التحقق'],
+  unpaid:['Unpaid','غير مدفوع'],not_required:['No transfer required','لا يلزم تحويل'],awaiting_transfer:['Awaiting transfer','بانتظار التحويل'],proof_submitted:['Awaiting verification','قيد التحقق'],
   verified:['Transfer verified','تم التحقق من التحويل'],rejected:['Evidence rejected','تم رفض الإثبات'],
-  cod:['Cash on delivery','الدفع عند الاستلام'],instapay:['InstaPay','إنستا باي'],instapay_deposit:['InstaPay deposit','مقدم إنستا باي']
+  cod:['Cash on delivery','الدفع عند الاستلام'],instapay:['Full InstaPay payment','الدفع بالكامل عبر إنستاباي'],instapay_deposit:['InstaPay deposit','مقدم إنستا باي']
 };
 const steps={pending:['confirmed','cancelled'],confirmed:['processing','cancelled'],processing:['shipped','cancelled'],shipped:['delivered']};
 export function orderStatus(code,lang){return statuses[code]?.[lang==='ar'?1:0]||code;}
@@ -16,6 +17,7 @@ export function AdminOrders({items,onRefresh}){
   return <div className="orders-stack">{items.map(order=><AdminOrder key={order._id} order={order} lang={lang} t={t} onRefresh={onRefresh}/>)}</div>;
 }
 function AdminOrder({order,lang,t,onRefresh}){
+  const {notify}=useStore();
   const ar=lang==='ar';
   const [amount,setAmount]=useState('');
   const [deliveryAmount,setDeliveryAmount]=useState('');
@@ -24,11 +26,12 @@ function AdminOrder({order,lang,t,onRefresh}){
   const patch=async change=>{
     if(busy)return;
     setBusy(true);setError('');
-    try{await api('/admin/orders/'+order._id,{method:'PATCH',body:JSON.stringify(change)});onRefresh();}
-    catch(error){setError(orderError(error,lang));}
+    try{await api('/admin/orders/'+order._id,{method:'PATCH',body:JSON.stringify(change)});notify('Order updated','تم تحديث الطلب');onRefresh();}
+    catch(error){setError(orderError(error,lang));notify('Could not update the order','تعذّر تحديث الطلب',true);}
     finally{setBusy(false);}
   };
-  const canFulfill=order.paymentMethod==='cod'||order.paymentStatus==='verified'&&(order.requiredUpfrontPiastres==null||order.verifiedPiastres>=order.requiredUpfrontPiastres);
+  const noTransferDue=order.paymentMethod==='instapay_deposit'&&order.paymentStatus==='not_required'&&order.requiredUpfrontPiastres===0;
+  const canFulfill=order.paymentMethod==='cod'||noTransferDue||order.paymentStatus==='verified'&&(order.requiredUpfrontPiastres==null||order.verifiedPiastres>=order.requiredUpfrontPiastres);
   const paymentAssets=order.lines?.filter(line=>line.customization?.assetId)||[];
   return <details className="order-item admin-order">
     <summary><strong>{order.number}</strong><span>{orderStatus(order.status,lang)} · {money(order.totalEGP,lang)}</span></summary>
@@ -54,7 +57,7 @@ function AdminOrder({order,lang,t,onRefresh}){
       <p>{ar?'تحقق من المبلغ والرقم المرجعي في الحساب المستلم.':'Verify the received amount and reference in the receiving account.'}</p>
       <label>{ar?'المبلغ المستلم بالجنيه':'Amount received (EGP)'}<input type="number" step=".01" min="0" required value={amount} onChange={event=>setAmount(event.target.value)}/></label>
       <div className="admin-actions">
-        <button type="submit" disabled={busy}>{ar?'تأكيد التحويل':'Verify transfer'}</button>
+        <button type="submit" disabled={busy}><MutationLabel busy={busy} lang={lang} label={ar?'تأكيد التحويل':'Verify transfer'}/></button>
         <button type="button" disabled={busy} onClick={()=>patch({paymentStatus:'rejected'})}>{ar?'رفض الإثبات':'Reject evidence'}</button>
       </div>
     </form>}

@@ -9,9 +9,13 @@
     "seed": "node scripts/seed.js",
     "create:admin": "node scripts/create-admin.js",
     "test": "node --test \"test/*.test.js\"",
-    "uploads:cleanup": "node scripts/cleanup-uploads.js"
+    "uploads:cleanup": "node scripts/cleanup-uploads.js",
+    "email:test": "node scripts/test-email.js",
+    "media:catalog": "node scripts/catalog-media.js",
+    "db:indexes": "node scripts/indexes.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1178.0",
     "bcryptjs": "^2.4.3",
     "compression": "^1.7.4",
     "cookie-parser": "^1.4.7",
@@ -20,6 +24,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "mongoose": "^8.9.5",
+    "nodemailer": "^10.6.1",
     "sharp": "^0.35.5",
     "zod": "^4.6.7"
   },

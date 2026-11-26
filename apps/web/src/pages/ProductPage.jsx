@@ -1,8 +1,10 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {Link,useParams} from 'react-router-dom';
-import {ArrowRight,ChevronLeft,ChevronRight,Minus,Plus} from 'lucide-react';
+import {ArrowRight,ChevronLeft,ChevronRight,Plus} from 'lucide-react';
 import {api,FlyToCart,label,money,ProductCard,useStore} from '../App.jsx';
 import {LoadingState,RetryState,StoreImage} from '../components/LoadingState.jsx';
+import QuantityControl from '../components/QuantityControl.jsx';
+import {madeToOrder} from '../components/Information.jsx';
 import {ArtworkDialog} from '../components/Artwork.jsx';
 import {sizeInfo,variantLabel} from '../sizes.js';
 import {productStructuredData} from '../product-metadata.js';
@@ -42,8 +44,8 @@ function ProductDetail({product,related}){
   const [quantity,setQuantity]=useState(1);
   const [photo,setPhoto]=useState(0);
   const [addons,setAddons]=useState([]);
-  const [notice,setNotice]=useState('');
   const upload=useRef(null);
+  const chartDialog=useRef(null);
   const touch=useRef(null);
   const choice=product.variants.find(item=>item.sku===variant);
   const limit=Math.min(choice?.stock??10,10);
@@ -58,10 +60,10 @@ function ProductDetail({product,related}){
       categorySlug:product.categorySlug,requiresPrepayment:product.category?.requiresPrepayment===true,
       quantity,addons,title:label(product.name,lang),image:images[0]?.url,unitPriceEGP:choice.priceEGP+extraCost,customizationId
     });
-    setNotice(accepted?(ar?'تمت الإضافة إلى السلة':'Added to your cart'):(ar?'لا يمكن إضافة هذه الكمية إلى السلة.':'That quantity cannot be added to the cart.'));
     return accepted;
   };
-  const compare=size.comparison||size.label;
+  const compare=size.comparison;
+  const hasChart=initial.chart&&product.variants.some(item=>sizeInfo(item.label,product.categorySlug,lang).chart);
   const title=label(product.name,lang);
   useEffect(()=>{
     document.title=title+' | Gallermo Store';
@@ -107,36 +109,42 @@ function ProductDetail({product,related}){
         <div className="detail-price">{money((choice?.priceEGP??0)+extraCost,lang)}</div>
         {product.variants.length>1&&<fieldset className="choice-field"><legend>{ar?'اختر المقاس':'Choose size'}</legend><div className="size-buttons">
           {product.variants.map(item=><button type="button" key={item.sku} className={item.sku===variant?'selected':''} disabled={item.stock===0} aria-pressed={item.sku===variant}
-            onClick={()=>{setVariant(item.sku);setQuantity(value=>Math.min(value,item.stock??10));setNotice('');}}>{variantLabel(item.label,lang,product.categorySlug)}</button>)}
+            onClick={()=>{setVariant(item.sku);setQuantity(value=>Math.min(value,item.stock??10));}}>{variantLabel(item.label,lang,product.categorySlug)}</button>)}
         </div></fieldset>}
         {product.addons?.length>0&&<fieldset className="choice-field"><legend>{ar?'إضافات':'Optional extras'}</legend>
           {product.addons.map(item=><label className="check-row" key={item.code}><input type="checkbox" checked={addons.includes(item.code)}
             onChange={event=>setAddons(values=>event.target.checked?[...values,item.code]:values.filter(code=>code!==item.code))}/>{label(item.label,lang)} - {money(item.priceEGP,lang)}</label>)}
         </fieldset>}
-        <div className="quantity-control detail-quantity" aria-label={ar?'الكمية':'Quantity'}>
-          <button type="button" disabled={quantity<=1} aria-label={ar?'تقليل الكمية':'Decrease quantity'} onClick={()=>setQuantity(value=>value-1)}><Minus size={17}/></button>
-          <output aria-live="polite">{quantity}</output>
-          <button type="button" disabled={quantity>=limit} aria-label={ar?'زيادة الكمية':'Increase quantity'} onClick={()=>setQuantity(value=>value+1)}><Plus size={17}/></button>
+        {product.category?.requiresPrepayment&&<p className="notice-box">{ar?'ادفع مقدمًا أو ادفع الإجمالي عبر إنستاباي عند إتمام الطلب.':'Pay a deposit or pay in full with InstaPay at checkout.'}</p>}
+        <div className="purchase-actions">
+          <QuantityControl lang={lang} quantity={quantity} onDecrease={quantity>1?()=>setQuantity(value=>value-1):undefined}
+            onIncrease={quantity<limit?()=>setQuantity(value=>value+1):undefined}/>
+          <button type="button" className="button-primary" disabled={!limit} onClick={event=>{if(addProduct())FlyToCart(event);}}>{limit?t.add:(ar?'غير متاح':'Out of stock')}<ArrowRight size={18}/></button>
         </div>
-        {product.category?.requiresPrepayment&&<p className="notice-box">{ar?'يتطلب هذا المنتج مقدمًا عند إتمام الطلب.':'This product requires a deposit at checkout.'}</p>}
-        <button type="button" className="button-primary big-cta" disabled={!limit} onClick={event=>{if(addProduct())FlyToCart(event);}}>{limit?t.add:(ar?'غير متاح':'Out of stock')}<ArrowRight size={18}/></button>
         {product.category?.customizationEnabled&&<>
           <button className="button-secondary big-cta customize-cta" disabled={!limit||!config.customizationAvailable} type="button" onClick={()=>upload.current.showModal()}>{ar?'خصّص هذا المنتج':'Customize this'}</button>
+          <p className="muted">{ar?'التخصيص مجاني، ونستخدم التصميم المرفوع مباشرة في التصنيع.':'Customization is free. We produce your item using the artwork you submit.'}</p>
           {config.customizationAvailable?<ArtworkDialog dialog={upload} lang={lang} product={product} variant={choice} onAccept={id=>addProduct(id)}/>:
             <p className="muted">{ar?'رفع التصاميم غير متاح مؤقتًا.':'Artwork upload is temporarily unavailable.'}</p>}
         </>}
-        <p className="inline-success" role="status">{notice}</p>
         <div className="product-accordions faq-list">
           {label(product.description,lang)&&<details><summary>{ar?'الوصف':'Description'}<Plus size={17}/></summary><p>{label(product.description,lang)}</p></details>}
           {categoryName&&<details><summary>{ar?'التفاصيل':'Details'}<Plus size={17}/></summary><p>{categoryName}{size.label?' · '+size.label:''}</p></details>}
-          {size.label&&<details><summary>{ar?'دليل المقاسات':'Size guide'}<Plus size={17}/></summary>
-            <p>{product.variants.map(item=>variantLabel(item.label,lang,product.categorySlug)).join(' · ')}</p>
-            {size.chart&&initial.chart&&<a className="size-chart" href="/size-charts/frames-sizechart.webp" target="_blank" rel="noreferrer">
-              <img src="/size-charts/frames-sizechart.webp" loading="lazy" alt={ar?'دليل مرئي لمقاسات الإطارات المعروضة':'Visual comparison chart for the listed frame sizes'}/></a>}
-          </details>}
+          {hasChart&&<div className="size-guide-action">
+            <button type="button" className="button-secondary" onClick={()=>chartDialog.current.showModal()}>{ar?'دليل المقاسات':'Size Guide'}</button>
+            <dialog ref={chartDialog} className="artwork-dialog frame-chart" aria-labelledby="chart-title" onClick={event=>{if(event.target===event.currentTarget)chartDialog.current.close();}}>
+              <div className="frame-chart-content">
+                <div className="section-row"><h2 id="chart-title">{ar?'دليل المقاسات':'Size Guide'}</h2>
+                  <button type="button" autoFocus className="icon-button" aria-label={ar?'إغلاق':'Close'} onClick={()=>chartDialog.current.close()}>×</button>
+                </div>
+                <p>{ar?'يعرض الدليل مقاسات الإطارات المدوّنة في الصورة.':'This chart covers the frame sizes listed in the image.'}</p>
+                <img src="/size-charts/frames-sizechart.webp" loading="lazy" alt={ar?'مقارنة مرئية لمقاسات الإطارات الموضحة':'Visual comparison of the listed frame sizes'}/>
+              </div>
+            </dialog>
+          </div>}
           {compare&&<details><summary>{ar?'عن هذا المقاس':'About this size'}<Plus size={17}/></summary><p>{compare}</p></details>}
           <details><summary>{ar?'الاسترجاع والاستبدال':'Returns & exchanges'}<Plus size={17}/></summary>
-            <p>{ar?'تسري حقوق حماية المستهلك القانونية.':'Statutory consumer rights apply.'} <Link className="text-link" to="/information/returns">{ar?'تفاصيل الاسترجاع':'Returns information'}</Link></p></details>
+            <p>{madeToOrder[ar?1:0]} <Link className="text-link" to="/information/returns">{ar?'تفاصيل الاسترجاع':'Returns information'}</Link></p></details>
         </div>
       </div>
     </div>
